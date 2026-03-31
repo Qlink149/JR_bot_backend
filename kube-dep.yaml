@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${DEPLOY_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qlink-chatbot
+  namespace: ${DEPLOY_NAMESPACE}
+  labels:
+    app: qlink-chatbot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qlink-chatbot
+  template:
+    metadata:
+      labels:
+        app: qlink-chatbot
+    spec:
+      containers:
+        - name: qlink-chatbot
+          image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENV_MODE
+              value: "${ENV_MODE}"
+            - name: PYTHONUNBUFFERED
+              value: "${PYTHONUNBUFFERED}"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "${PYTHONDONTWRITEBYTECODE}"
+            - name: OPENAI_API_KEY
+              value: "${OPENAI_API_KEY}"
+            - name: MONGO_URI
+              value: "${MONGO_URI}"
+            - name: GUPSHUP_APP_ID
+              value: "${GUPSHUP_APP_ID}"
+            - name: GUPSHUP_TOKEN
+              value: "${GUPSHUP_TOKEN}"
+            - name: GUPSHUP_APP_NAME
+              value: "${GUPSHUP_APP_NAME}"
+            - name: GUPSHUP_API_KEY
+              value: "${GUPSHUP_API_KEY}"
+            - name: CALLCHIMP_API_KEY
+              value: "${CALLCHIMP_API_KEY}"
+          resources:
+            requests:
+              memory: "1000Mi"
+              cpu: "350m"
+            limits:
+              memory: "3000Mi"
+              cpu: "700m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qlink-chatbot
+  namespace: ${DEPLOY_NAMESPACE}
+  labels:
+    app: qlink-chatbot
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: qlink-chatbot
