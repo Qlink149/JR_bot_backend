@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from pymongo import MongoClient
 
 from qlink_chatbot.routes.general_routes import general_router
+from qlink_chatbot.routes.whatsapp_routes import whatsapp_router
 from qlink_chatbot.routes.ws_routes import (
     ws_router,
 )
@@ -24,6 +25,7 @@ sessions_collection = db["users"]
 
 app.include_router(general_router, prefix="/api/web")
 app.include_router(ws_router)
+app.include_router(whatsapp_router)
 
 @app.get("/ping")
 def ping():

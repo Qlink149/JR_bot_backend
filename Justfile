@@ -23,4 +23,4 @@ clean:
 
 # Follow logs for a specific service
 follow-logs bot:
-    docker logs -f qlink-chatbot-bot-1; \
+    docker logs -f jr_bot_backend-bot-1; \

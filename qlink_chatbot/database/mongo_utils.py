@@ -11,10 +11,17 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["JR"]
 sessions_collection = db["users"]
+whatsapp_sessions_collection = db["users_whatsapp"]
 internal_collection = db["internals"]
 agent_alerts = db["agent_alerts"]
 agents_profile = db["agents"]
 inventory_cache_collection = db["inventory_cache"]
+
+
+def _get_sessions_collection(collection_name: str = "users"):
+    if collection_name == "users_whatsapp":
+        return whatsapp_sessions_collection
+    return sessions_collection
 
 
 def agent_login(emp_id: str, password: str):
@@ -42,12 +49,18 @@ def agent_login(emp_id: str, password: str):
         logger.error("Agent login error", extra={"error": str(e)})
         return {"success": False, "message": "Server error"}
 
-def save_message(session_id: str, role: str, content: str):
+def save_message(
+    session_id: str,
+    role: str,
+    content: str,
+    collection_name: str = "users",
+):
     """Append message to chat_history inside session document."""
     try:
         now = datetime.utcnow()
         message = {"role": role, "content": content, "timestamp": now}
-        sessions_collection.update_one(
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session_collection.update_one(
             {"session_id": session_id},
             {
                 "$push": {"chat_history": message},
@@ -59,11 +72,18 @@ def save_message(session_id: str, role: str, content: str):
         logger.error("Error occurred while saving message", extra={"error": e})
         raise e
 
-def create_session(session_id: str, country_code: str, name: str, is_ai: bool = True):
+def create_session(
+    session_id: str,
+    country_code: str,
+    name: str,
+    is_ai: bool = True,
+    collection_name: str = "users",
+):
     """Create a new user session."""
     try:
         now = datetime.utcnow()
-        sessions_collection.insert_one({
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session_collection.insert_one({
             "session_id": session_id,
             "country_code": country_code,
             "is_ai": is_ai,
@@ -129,10 +149,11 @@ def get_all_sessions():
         logger.error("Error fetching all sessions", extra={"error": e})
         raise e
 
-def get_session_by_id(session_id: str):
+def get_session_by_id(session_id: str, collection_name: str = "users"):
     """Return a single session by session_id."""
     try:
-        session = sessions_collection.find_one({"session_id": session_id})
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session = session_collection.find_one({"session_id": session_id})
         if session:
             session["_id"] = str(session["_id"])
         return session
@@ -141,11 +162,12 @@ def get_session_by_id(session_id: str):
         raise e
 
 
-def save_user_name(session_id: str, name: str):
+def save_user_name(session_id: str, name: str, collection_name: str = "users"):
     """Store or update the user's name in the session."""
     try:
         now = datetime.utcnow()
-        result = sessions_collection.update_one(
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        result = session_collection.update_one(
             {"session_id": session_id},
             {"$set": {"user_name": name, "updated_at": now}}
         )
@@ -167,7 +189,12 @@ def reset_is_ai_true(session_id: str):
         logger.error("Error reseting is ai feild", extra={"error": e})
         raise e
 
-def save_previous_search(session_id: str, search_keyword: str, search_results: list):
+def save_previous_search(
+    session_id: str,
+    search_keyword: str,
+    search_results: list,
+    collection_name: str = "users",
+):
     """Store the user's previous search results in the session.
     Only keeps the last 3 searches.
     
@@ -175,7 +202,8 @@ def save_previous_search(session_id: str, search_keyword: str, search_results: l
     """
     try:
         now = datetime.utcnow()
-        result = sessions_collection.update_one(
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        result = session_collection.update_one(
             {"session_id": session_id},
             {
                 "$push": {
@@ -200,12 +228,13 @@ def save_previous_search(session_id: str, search_keyword: str, search_results: l
         logger.error("Error saving previous search", extra={"error": e})
         raise e
     
-def get_previous_search(session_id: str):
+def get_previous_search(session_id: str, collection_name: str = "users"):
     """Fetch the previous search results for a session.
     Returns an empty list if none exist.
     """
     try:
-        session = sessions_collection.find_one(
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session = session_collection.find_one(
             {"session_id": session_id},
             {"_id": 0, "previous_searches": 1, "previous_search": 1}
         )
@@ -218,12 +247,13 @@ def get_previous_search(session_id: str):
         logger.error("Error fetching previous search", extra={"error": e})
         raise e
     
-def user_name(session_id: str):
+def user_name(session_id: str, collection_name: str = "users"):
     """Fetch the previous search results for a session.
     Returns an empty list if none exist.
     """
     try:
-        session = sessions_collection.find_one({"session_id": session_id}, {"_id": 0, "user_name": 1})
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session = session_collection.find_one({"session_id": session_id}, {"_id": 0, "user_name": 1})
         if session and "user_name" in session:
             return session["user_name"]
         return ""

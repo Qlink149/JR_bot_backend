@@ -150,7 +150,14 @@ def agent_alert_tool(alert, sesson_id):
         logger.error("Error occured while using agent alert tool call.")
 
 
-async def chat_agent(chat_history, user_message, session_id, country_code, client_ip=""):
+async def chat_agent(
+    chat_history,
+    user_message,
+    session_id,
+    country_code,
+    client_ip="",
+    collection_name: str = "users",
+):
     """Main Jaipur Rugs chatbot agent."""
     response = None
     try:
@@ -170,7 +177,10 @@ async def chat_agent(chat_history, user_message, session_id, country_code, clien
         input_list = [
             {"role": "developer", "content": f"Chat history:\n{format_recent_chat_for_ai(chat_history)}"},
             {"role": "developer", "content": f"users country code: {country_code}"},
-            {"role": "developer", "content": f"user name: {user_name(session_id=session_id)}"},
+            {
+                "role": "developer",
+                "content": f"user name: {user_name(session_id=session_id, collection_name=collection_name)}",
+            },
             {"role": "developer", "content": "Never produce filler text like 'searching...' or 'one moment please'. If a tool is needed, directly call the tool without any extra wording."},
             {"role": "developer", "content": "When responding: do not add any narrative, status updates, waiting messages, politeness fillers, or redundant sentences. Either answer directly or call a tool directly."},
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
@@ -204,16 +214,28 @@ async def chat_agent(chat_history, user_message, session_id, country_code, clien
                 if item.name == "jaipur_rugs_product_search":
                     keyword = args.get("keyword")
                     products = await jaipur_rugs_product_search(keyword, client_ip=client_ip, country_code=country_code)
-                    save_previous_search(session_id, keyword, products)
+                    save_previous_search(
+                        session_id,
+                        keyword,
+                        products,
+                        collection_name=collection_name,
+                    )
                     output = json.dumps(products)
                     
                 elif item.name == "save_user_name":
                     name = args.get("name")
-                    save_user_name(session_id, name)
+                    save_user_name(
+                        session_id,
+                        name,
+                        collection_name=collection_name,
+                    )
                     output = json.dumps({"status": "success"})
 
                 elif item.name == "get_previous_search":
-                    prev_searches = get_previous_search(session_id=session_id)
+                    prev_searches = get_previous_search(
+                        session_id=session_id,
+                        collection_name=collection_name,
+                    )
                     output = json.dumps(prev_searches)
 
                 elif item.name == "search_kb":
