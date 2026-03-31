@@ -47,37 +47,35 @@ def _extract_user_message_text(message_payload: dict) -> str:
     return ""
 
 
-@whatsapp_router.post("/gupshup/fsai/message")
-@whatsapp_router.post("/gupshup/fsai/message")
-async def messages(data: Request):
-    """Message endpoint to receive and send messages on WhatsApp chatbot."""
+@whatsapp_router.post("/gupshup/message/hc")
+async def gupshup_messages(data: Request):
+    """Gupshup webhook endpoint to receive and reply to WhatsApp messages."""
     request_data = await data.json()
-    logger.info("Request received with data", extra={"data": request_data})
+    logger.info("Gupshup request received", extra={"data": request_data})
 
     phone_number = ""
-    payload_data = {}
 
     try:
         if "payload" in request_data:
-            logger.info("Payload found in request data, ignoring it")
+            logger.info("Payload callback found, ignoring")
             return {"status": "ignored", "reason": "payload_callback"}
 
         whatsapp_event = _extract_event(request_data)
 
-        if "statuses" in whatsapp_event:
-            status_payload = whatsapp_event["statuses"][0]
+        statuses = whatsapp_event.get("statuses", [])
+        if statuses:
+            status_payload = statuses[0]
             status = status_payload.get("type") or status_payload.get("status")
-            logger.info("Ignoring message with status", extra={"status": status})
-            return {"status": "success"}
+            logger.info("Ignoring status callback", extra={"status": status})
+            return {"status": "success", "ignored_status": status}
 
         incoming_messages = whatsapp_event.get("messages", [])
         if not incoming_messages:
             logger.info("No incoming messages in webhook payload")
             return {"status": "ignored", "reason": "no_messages"}
 
-        message_payload = incoming_messages[0]
-        phone_number = message_payload.get("from", "")
-
+        incoming_message = incoming_messages[0]
+        phone_number = incoming_message.get("from", "")
         if not phone_number:
             return JSONResponse(
                 content={"status": "error", "message": "Missing sender number"},
@@ -85,21 +83,12 @@ async def messages(data: Request):
             )
 
         whatsapp_username = _extract_username(whatsapp_event)
-        payload_data = {
-            "phone_number": phone_number,
-            "messages": message_payload,
-            "whatsapp_username": whatsapp_username,
-        }
-        logger.info(
-            "Data object to processor",
-            extra={"data": payload_data, "phone_number": phone_number},
-        )
+        user_text = _extract_user_message_text(incoming_message)
 
-        user_text = _extract_user_message_text(message_payload)
         if not user_text:
             logger.info(
                 "Ignoring unsupported inbound message type",
-                extra={"phone_number": phone_number, "message": message_payload},
+                extra={"phone_number": phone_number, "message": incoming_message},
             )
             return {"status": "ignored", "reason": "unsupported_message_type"}
 
@@ -149,34 +138,30 @@ async def messages(data: Request):
             collection_name=WHATSAPP_COLLECTION_NAME,
         )
 
-        payload_data["bot_response"] = [{"type": "text", "text": bot_text}]
-        logger.info(
-            "Bot response",
-            extra={
-                "bot_response": payload_data["bot_response"],
-                "phone_number": phone_number,
-            },
-        )
-
+        bot_responses = [{"type": "text", "text": bot_text}]
         dispatch_whatsapp_responses(
             phone_number=phone_number,
-            bot_responses=payload_data["bot_response"],
+            bot_responses=bot_responses,
         )
 
         return {"status": "success"}
 
     except Exception as e:
         logger.exception(
-            "Exception occured while running message endpoint",
+            "Exception occurred while handling WhatsApp webhook",
             extra={"exception": str(e), "phone_number": phone_number},
         )
 
         if phone_number:
             try:
-                fallback_response = [{"type": "text", "text": "Unexpected error occured."}]
                 dispatch_whatsapp_responses(
                     phone_number=phone_number,
-                    bot_responses=fallback_response,
+                    bot_responses=[
+                        {
+                            "type": "text",
+                            "text": "Unexpected error occurred.",
+                        }
+                    ],
                 )
             except Exception as send_error:
                 logger.error(
