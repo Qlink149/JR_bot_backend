@@ -5,7 +5,7 @@ from openai import AsyncOpenAI
 from qlink_chatbot.utils.logger_config import logger
 
 API_KEY = os.getenv("OPENAI_API_KEY")
-client = AsyncOpenAI(api_key=API_KEY)
+client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
 
 agent_summary_output_schema = {
     "format": {
@@ -103,6 +103,8 @@ async def summariser_agent(admin_messagaes):
     response = None
 
     try:
+        if not client:
+            raise RuntimeError("OPENAI_API_KEY is not configured.")
         input_list = [
             {"role": "user", "content": f"All the live agent texts are: {admin_messagaes}"}
         ]
