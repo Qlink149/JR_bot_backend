@@ -17,7 +17,7 @@ from qlink_chatbot.utils.jaipur_rugs_api import jaipur_rugs_product_search
 from qlink_chatbot.utils.logger_config import logger
 
 API_KEY = os.getenv("OPENAI_API_KEY")
-client = AsyncOpenAI(api_key=API_KEY)
+client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
 
 output_schema = {
     "format": {
@@ -161,6 +161,8 @@ async def chat_agent(
     """Main Jaipur Rugs chatbot agent."""
     response = None
     try:
+        if not client:
+            raise RuntimeError("OPENAI_API_KEY is not configured.")
         system_prompt_variable = return_system_prompt()
         if system_prompt_variable:
             system_prompt = build_system_prompt(
