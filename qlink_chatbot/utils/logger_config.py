@@ -87,6 +87,5 @@ class JsonFormatter(logging.Formatter):
 
         return json.dumps(log_data, indent=2, default=custom_serializer) + "\n**************\n"
 
-# Fixed for Vercel production read-only filesystem
 
 logger = SingletonLogger().logger

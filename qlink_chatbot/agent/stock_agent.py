@@ -7,15 +7,13 @@ from qlink_chatbot.agent.schema import output_schema, system_prompt
 from qlink_chatbot.utils.logger_config import logger
 
 API_KEY = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=API_KEY) if API_KEY else None
+client = OpenAI(api_key=API_KEY)
 
 MODEL = "gpt-4.1"
 
 def openai_stock_response(input):
     response = None
     try:
-        if not client:
-            raise RuntimeError("OPENAI_API_KEY is not configured.")
         response =  client.responses.create(
             model=MODEL,
             input=input,
