@@ -3,9 +3,12 @@ import time
 from datetime import datetime
 
 from bson import ObjectId
+from dotenv import load_dotenv
 from pymongo import MongoClient
 
 from qlink_chatbot.utils.logger_config import logger
+
+load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)

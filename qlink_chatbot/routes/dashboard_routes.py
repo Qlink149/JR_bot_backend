@@ -16,11 +16,12 @@ from qlink_chatbot.database.mongo_utils import (
     whatsapp_sessions_collection,
 )
 from qlink_chatbot.utils.env_load import gupshup_source
+from qlink_chatbot.utils.jaipur_rugs_api import products_collection as website_products_collection
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 
 dashboard_router = APIRouter(prefix="/api")
 
-products_collection = whatsapp_sessions_collection.database["dashboard_products"]
+manual_products_collection = whatsapp_sessions_collection.database["dashboard_products"]
 catalog_designs_collection = whatsapp_sessions_collection.database["catalog_designs"]
 
 
@@ -199,14 +200,66 @@ def save_prompt(payload: dict = Body(...)):
 def _product_doc(product: dict) -> dict:
     product = _jsonable(product)
     product["id"] = product.pop("_id", product.get("id"))
+    product["source"] = product.get("source", "manual")
     return product
+
+
+def _website_product_doc(product: dict) -> dict:
+    raw = product.get("raw") or {}
+    search = product.get("search") or {}
+    material = search.get("material") or {}
+    size = search.get("size") or {}
+    barcode = raw.get("BarCode") or product.get("BarCode") or raw.get("SKU") or ""
+    slug = raw.get("ProductURL") or ""
+    name = raw.get("Name") or raw.get("Design") or raw.get("SKU") or "Jaipur Rugs Product"
+    category = raw.get("Collection") or search.get("style") or ""
+    image_urls = [
+        raw.get("HeadShot"),
+        raw.get("Corner"),
+        raw.get("CloseUp"),
+        raw.get("Floorshot"),
+    ]
+    image_urls = [url for url in image_urls if url and not url.endswith("/")]
+
+    return {
+        "id": f"jr:{barcode or slug}",
+        "source": "jaipur_rugs",
+        "name": name,
+        "type": raw.get("ProductType") or "Rugs",
+        "category": category,
+        "collection": category,
+        "price": raw.get("INR_MRP") or search.get("price") or "",
+        "buy_link": (
+            f"https://www.jaipurrugs.com/in/rugs/{slug}?barcode={barcode}"
+            if slug
+            else ""
+        ),
+        "description": raw.get("FullDescription") or raw.get("ShortDescription") or "",
+        "location": "",
+        "image_url": image_urls[0] if image_urls else "",
+        "image_urls": image_urls,
+        "baseTags": " | ".join(
+            str(value)
+            for value in [
+                category,
+                search.get("style"),
+                search.get("construction"),
+                material.get("primary"),
+                size.get("group"),
+            ]
+            if value
+        ),
+        "sku": raw.get("SKU") or "",
+        "barcode": barcode,
+    }
 
 
 @dashboard_router.get("/products")
 def list_products(skip: int = 0, limit: int = 100, q: str = ""):
-    query = {}
+    manual_query = {}
+    website_query = {"flags.inStock": True}
     if q:
-        query = {
+        manual_query = {
             "$or": [
                 {"name": {"$regex": q, "$options": "i"}},
                 {"type": {"$regex": q, "$options": "i"}},
@@ -214,9 +267,45 @@ def list_products(skip: int = 0, limit: int = 100, q: str = ""):
                 {"description": {"$regex": q, "$options": "i"}},
             ]
         }
-    total = products_collection.count_documents(query)
-    products = products_collection.find(query).sort("updated_at", -1).skip(skip).limit(limit)
-    return {"data": [_product_doc(product) for product in products], "meta": {"total": total}}
+        website_query["$or"] = [
+            {"raw.Name": {"$regex": q, "$options": "i"}},
+            {"raw.Collection": {"$regex": q, "$options": "i"}},
+            {"raw.Design": {"$regex": q, "$options": "i"}},
+            {"raw.SKU": {"$regex": q, "$options": "i"}},
+            {"raw.BarCode": {"$regex": q, "$options": "i"}},
+            {"raw.FullDescription": {"$regex": q, "$options": "i"}},
+            {"search.style": {"$regex": q, "$options": "i"}},
+            {"search.material.primary": {"$regex": q, "$options": "i"}},
+        ]
+
+    manual_total = manual_products_collection.count_documents(manual_query)
+    website_total = website_products_collection.count_documents(website_query)
+
+    data = []
+    remaining = limit
+    website_skip = max(0, skip - manual_total)
+
+    if skip < manual_total and remaining > 0:
+        manual_products = (
+            manual_products_collection.find(manual_query)
+            .sort("updated_at", -1)
+            .skip(skip)
+            .limit(remaining)
+        )
+        manual_data = [_product_doc(product) for product in manual_products]
+        data.extend(manual_data)
+        remaining -= len(manual_data)
+
+    if remaining > 0:
+        website_products = (
+            website_products_collection.find(website_query, {"_id": 0})
+            .sort("raw.ModifyDate", -1)
+            .skip(website_skip)
+            .limit(remaining)
+        )
+        data.extend([_website_product_doc(product) for product in website_products])
+
+    return {"data": data, "meta": {"total": manual_total + website_total}}
 
 
 @dashboard_router.post("/products")
@@ -244,7 +333,7 @@ async def create_product(
         "created_at": now,
         "updated_at": now,
     }
-    result = products_collection.insert_one(doc)
+    result = manual_products_collection.insert_one(doc)
     doc["_id"] = result.inserted_id
     return {"data": _product_doc(doc)}
 
@@ -261,6 +350,12 @@ async def update_product(
     location: str = Form(""),
     image: UploadFile | None = File(None),
 ):
+    if product_id.startswith("jr:"):
+        raise HTTPException(
+            status_code=400,
+            detail="Website products are read-only. Edit them in the Jaipur Rugs source catalog.",
+        )
+
     update = {
         "name": name,
         "type": type,
@@ -273,8 +368,8 @@ async def update_product(
     }
     if image:
         update["image_filename"] = image.filename
-    products_collection.update_one({"_id": ObjectId(product_id)}, {"$set": update})
-    product = products_collection.find_one({"_id": ObjectId(product_id)})
+    manual_products_collection.update_one({"_id": ObjectId(product_id)}, {"$set": update})
+    product = manual_products_collection.find_one({"_id": ObjectId(product_id)})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     return {"data": _product_doc(product)}
@@ -282,7 +377,12 @@ async def update_product(
 
 @dashboard_router.delete("/products/{product_id}")
 def delete_product(product_id: str):
-    result = products_collection.delete_one({"_id": ObjectId(product_id)})
+    if product_id.startswith("jr:"):
+        raise HTTPException(
+            status_code=400,
+            detail="Website products are read-only. Remove them from the Jaipur Rugs source catalog.",
+        )
+    result = manual_products_collection.delete_one({"_id": ObjectId(product_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Product not found")
     return {"success": True}
