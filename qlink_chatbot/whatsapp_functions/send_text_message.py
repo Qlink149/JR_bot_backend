@@ -39,6 +39,7 @@ def send_text_message(phone_number: str, bot_response: str):
 
     # Modify the data to match the cURL request format
     data = {
+        "channel": "whatsapp",
         "source": source,
         "destination": destination,
         "message": json.dumps(bot_response),

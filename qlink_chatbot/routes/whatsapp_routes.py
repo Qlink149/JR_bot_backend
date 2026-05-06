@@ -21,10 +21,32 @@ def _extract_event(request_data: dict) -> dict:
     return changes[0].get("value", {}) if changes else {}
 
 
-def _extract_username(whatsapp_event: dict) -> str:
+def _extract_gupshup_message(request_data: dict) -> dict:
+    """Return a normalized inbound message from Gupshup v2 callbacks."""
+    if request_data.get("type") != "message":
+        return {}
+
+    payload = request_data.get("payload") or {}
+    message_type = payload.get("type", "")
+    content = payload.get("payload") or {}
+
+    text = ""
+    if message_type == "text":
+        text = content.get("text", "")
+    elif message_type in {"button_reply", "list_reply"}:
+        text = content.get("title") or content.get("text") or content.get("postbackText", "")
+
+    return {
+        "from": payload.get("source", ""),
+        "text": (text or "").strip(),
+        "name": (payload.get("sender") or {}).get("name", ""),
+    }
+
+
+def _extract_username(whatsapp_event: dict, fallback_name: str = "") -> str:
     contacts = whatsapp_event.get("contacts", [])
     if not contacts:
-        return ""
+        return fallback_name
     return contacts[0].get("profile", {}).get("name", "")
 
 
@@ -56,9 +78,13 @@ async def gupshup_messages(data: Request):
     phone_number = ""
 
     try:
-        if "payload" in request_data:
-            logger.info("Payload callback found, ignoring")
-            return {"status": "ignored", "reason": "payload_callback"}
+        gupshup_message = _extract_gupshup_message(request_data)
+        if request_data.get("type") and request_data.get("type") != "message":
+            logger.info(
+                "Ignoring non-message Gupshup callback",
+                extra={"type": request_data.get("type")},
+            )
+            return {"status": "success", "ignored_type": request_data.get("type")}
 
         whatsapp_event = _extract_event(request_data)
 
@@ -70,25 +96,29 @@ async def gupshup_messages(data: Request):
             return {"status": "success", "ignored_status": status}
 
         incoming_messages = whatsapp_event.get("messages", [])
-        if not incoming_messages:
+        if gupshup_message:
+            phone_number = gupshup_message.get("from", "")
+            whatsapp_username = gupshup_message.get("name", "")
+            user_text = gupshup_message.get("text", "")
+        elif incoming_messages:
+            incoming_message = incoming_messages[0]
+            phone_number = incoming_message.get("from", "")
+            whatsapp_username = _extract_username(whatsapp_event)
+            user_text = _extract_user_message_text(incoming_message)
+        else:
             logger.info("No incoming messages in webhook payload")
             return {"status": "ignored", "reason": "no_messages"}
 
-        incoming_message = incoming_messages[0]
-        phone_number = incoming_message.get("from", "")
         if not phone_number:
             return JSONResponse(
                 content={"status": "error", "message": "Missing sender number"},
                 status_code=400,
             )
 
-        whatsapp_username = _extract_username(whatsapp_event)
-        user_text = _extract_user_message_text(incoming_message)
-
         if not user_text:
             logger.info(
                 "Ignoring unsupported inbound message type",
-                extra={"phone_number": phone_number, "message": incoming_message},
+                extra={"phone_number": phone_number, "message": request_data},
             )
             return {"status": "ignored", "reason": "unsupported_message_type"}
 

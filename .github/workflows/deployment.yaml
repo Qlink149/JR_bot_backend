@@ -62,6 +62,12 @@ jobs:
               -e PYTHONDONTWRITEBYTECODE=1 \
               -e OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
               -e MONGO_URI=${{ secrets.MONGO_URI }} \
+              -e GUPSHUP_APP_ID=${{ secrets.GUPSHUP_APP_ID }} \
+              -e GUPSHUP_TOKEN=${{ secrets.GUPSHUP_TOKEN }} \
+              -e GUPSHUP_APP_NAME=${{ secrets.GUPSHUP_APP_NAME }} \
+              -e GUPSHUP_API_KEY=${{ secrets.GUPSHUP_API_KEY }} \
+              -e GUPSHUP_SOURCE=${{ secrets.GUPSHUP_SOURCE }} \
+              -e DEFAULT_COUNTRY_CODE=${{ secrets.DEFAULT_COUNTRY_CODE }} \
               -e ENV_MODE=${{ secrets.ENV_MODE }} \
               -e PINECONE_API=${{ secrets.PINECONE_API }} \
               -e R2_ACCESS_KEY=${{ secrets.R2_ACCESS_KEY }} \

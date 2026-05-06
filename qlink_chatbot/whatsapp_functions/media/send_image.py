@@ -43,6 +43,7 @@ def send_image_message(phone_number: str, bot_response: dict):
     }
 
     data = {
+        "channel": "whatsapp",
         "source": gupshup_source or GUPSHUP_SOURCE,
         "destination": destination,
         "message": json.dumps(message_payload),

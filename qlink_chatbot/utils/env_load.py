@@ -1,5 +1,8 @@
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 gupshup_api_key = os.getenv("GUPSHUP_API_KEY", "")
 gupshup_app_name = os.getenv("GUPSHUP_APP_NAME", "")

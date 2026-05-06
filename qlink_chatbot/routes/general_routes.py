@@ -40,7 +40,7 @@ def short_id():
 @general_router.get("/ping")
 def ping():
     logger.info("Ping endpoint called")
-    return {"message": "Qlink <> Jaipur Rugs Web backend API is up and running"}
+    return {"message": "Jaipur Rugs web backend API is up and running"}
 
 @general_router.post("/login")
 async def agent_login_route(payload: dict):
