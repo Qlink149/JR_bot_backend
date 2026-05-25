@@ -13,10 +13,12 @@ from qlink_chatbot.agent.utils.chat_agent_prompts import (
 )
 from qlink_chatbot.database.mongo_utils import (
     internal_collection,
+    toggle_ai,
     whatsapp_sessions_collection,
 )
 from qlink_chatbot.utils.env_load import gupshup_source
 from qlink_chatbot.utils.jaipur_rugs_api import products_collection as website_products_collection
+from qlink_chatbot.utils.jr_api_client import get_all_products as _jr_get_all_products
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 
 dashboard_router = APIRouter(prefix="/api")
@@ -166,6 +168,75 @@ def send_whatsapp_message(payload: dict = Body(...)):
         upsert=True,
     )
     return {"success": True}
+
+
+@dashboard_router.post("/sync-products")
+async def sync_products():
+    """Pull all products from the JR API and upsert into MongoDB.
+
+    Stores each product in the nested raw/search/flags format that the chatbot
+    search and admin product listing already expect.
+    Call this manually (or via an external cron) whenever the product catalog needs refreshing.
+    """
+    products = await _jr_get_all_products()
+    synced = 0
+    skipped = 0
+
+    for p in products:
+        if not p.get("BarCode"):
+            skipped += 1
+            continue
+
+        doc = {
+            "raw": p,
+            "BarCode": p.get("BarCode"),
+            "SKU": p.get("SKU", ""),
+            "flags": {
+                "inStock": bool(p.get("LiveStatus")) and bool(p.get("Published")),
+            },
+            "search": {
+                "color": {
+                    "single": p.get("GrColor", ""),
+                    "multi": p.get("ColorFamily", ""),
+                },
+                "material": {
+                    "primary": p.get("Material", ""),
+                    "family": p.get("MaterialFamilies", ""),
+                    "details": p.get("MaterialDetails", ""),
+                },
+                "size": {
+                    "exact": p.get("SizeInFT", ""),
+                    "group": p.get("SizeGroupInFT", ""),
+                },
+                "construction": p.get("Construction", ""),
+                "style": p.get("Style", ""),
+                "shape": p.get("Shape", ""),
+                "price": p.get("INR_MRP"),
+                "quality": p.get("Quality", ""),
+                "weight": p.get("Weight", 0.0),
+                "room": [r.strip() for r in (p.get("Room") or "").split(",") if r.strip()],
+            },
+            "updated_at": datetime.utcnow(),
+        }
+
+        website_products_collection.update_one(
+            {"BarCode": p["BarCode"]},
+            {"$set": doc, "$setOnInsert": {"created_at": datetime.utcnow()}},
+            upsert=True,
+        )
+        synced += 1
+
+    return {"synced": synced, "skipped": skipped}
+
+
+@dashboard_router.post("/conversations/{phone}/toggle-ai")
+def toggle_conversation_ai(phone: str):
+    """Switch a WhatsApp conversation between AI mode and human-agent mode."""
+    phone = phone.strip().lower()
+    new_status = toggle_ai(session_id=phone, collection_name="users_whatsapp")
+    if new_status is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"phone": phone, "is_ai": new_status}
 
 
 @dashboard_router.get("/prompt")

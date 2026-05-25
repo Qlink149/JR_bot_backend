@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 from openai import AsyncOpenAI
 
@@ -176,8 +177,13 @@ async def chat_agent(
             
 
 
+        _IST = timezone(timedelta(hours=5, minutes=30))
+        _now_ist = datetime.now(_IST)
+        _ist_time_str = _now_ist.strftime("%A, %I:%M %p IST")
+
         input_list = [
             {"role": "developer", "content": f"Chat history:\n{format_recent_chat_for_ai(chat_history)}"},
+            {"role": "developer", "content": f"Current date and time: {_ist_time_str}"},
             {"role": "developer", "content": f"users country code: {country_code}"},
             {
                 "role": "developer",

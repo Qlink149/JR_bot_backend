@@ -82,14 +82,12 @@ def _extract_colors_from_text(text: str) -> tuple[list[str], str]:
     extracted: list[str] = []
     residual = text
 
-    # Match longer color words first (e.g. multicolor before multi).
     for color in sorted(COMMON_COLORS, key=len, reverse=True):
-        pattern = rf"\\b{re.escape(color)}\\b"
+        pattern = rf"\b{re.escape(color)}\b"
         if re.search(pattern, residual):
             extracted.append(color)
             residual = re.sub(pattern, " ", residual)
 
-    # Remove common connectors/noise that appear with color phrases.
     residual = re.sub(r"\b(and|or|with|in|of|for|rug|rugs)\b", " ", residual)
     residual = re.sub(r"\s+", " ", residual).strip()
 
@@ -254,7 +252,6 @@ def _resolve_color_sku_scores(colors: list[str], limit: int = 1000) -> tuple[lis
                 continue
             color_pct_map[color_key] = float(entry.get("v", 0) or 0)
 
-        # For multi-color queries, keep only SKUs that contain all requested colors.
         if len(colors) > 1 and not _color_map_has_all_requested(color_pct_map, colors):
             continue
 
@@ -272,7 +269,6 @@ def _resolve_color_sku_scores(colors: list[str], limit: int = 1000) -> tuple[lis
 
 
 def _highest_matched_color(color_map: dict, requested_colors: list[str]) -> tuple[str, float]:
-    """Return highest matched requested color and its percentage."""
     if not color_map:
         return "", 0.0
 
@@ -287,7 +283,6 @@ def _highest_matched_color(color_map: dict, requested_colors: list[str]) -> tupl
             best_color = color_key
             best_pct = pct
 
-    # Fallback to the highest available color if no requested color key matched exactly.
     if not best_color and color_map:
         best_color, best_pct = max(color_map.items(), key=lambda x: float(x[1] or 0))
         best_pct = float(best_pct or 0)
@@ -296,10 +291,6 @@ def _highest_matched_color(color_map: dict, requested_colors: list[str]) -> tupl
 
 
 def _parse_keyword_filters(keyword: str):
-    """
-    Parse a &-separated keyword string into structured filters.
-    Returns: colors, materials, constructions, styles, sizes, price_filter, weight_filter, generics
-    """
     parts = [p.strip() for p in keyword.split("&")]
     colors = []
     materials = []
@@ -315,8 +306,6 @@ def _parse_keyword_filters(keyword: str):
         if not lower:
             continue
 
-        # Color phrases inside free text: "red rugs", "red and blue rugs".
-        # Keep any remaining text as generic so other filters still work.
         found_colors, residual_text = _extract_colors_from_text(lower)
         if found_colors:
             colors.extend(found_colors)
@@ -324,7 +313,6 @@ def _parse_keyword_filters(keyword: str):
             if not lower:
                 continue
 
-        # Price: "INR 30000"
         price_match = re.match(
             r'^(inr|usd|eur|gbp|aud|chf|sgd|aed)\s+([\d,]+(?:\.\d+)?)$', lower
         )
@@ -335,41 +323,33 @@ def _parse_keyword_filters(keyword: str):
             }
             continue
 
-        # Weight ceiling: "weight 8", "8kg", "weight 8kg"
         weight_match = re.match(r'^(?:weight\s*)?([\d.]+)\s*kg?$', lower)
         if weight_match:
             weight_filter = float(weight_match.group(1))
             continue
 
-        # Size: "8x10", "5x7", "9x12"
         if re.match(r'^\d+\s*x\s*\d+$', lower):
             sizes.append(lower.replace(" ", ""))
             continue
 
-        # Color
         if lower in COMMON_COLORS:
             colors.append(lower)
             continue
 
-        # Construction (check before style since "hand knotted" is multi-word)
         if any(c in lower for c in KNOWN_CONSTRUCTIONS):
             constructions.append(lower)
             continue
 
-        # Material
         if lower in KNOWN_MATERIALS:
             materials.append(lower)
             continue
 
-        # Style
         if lower in KNOWN_STYLES:
             styles.append(lower)
             continue
 
-        # Everything else → generic text match
         generics.append(lower)
 
-    # Deduplicate while preserving order so fallback logic sees accurate color count.
     colors = list(dict.fromkeys(colors))
 
     return colors, materials, constructions, styles, sizes, price_filter, weight_filter, generics
@@ -388,7 +368,6 @@ def _build_mongo_query(
     generics: list,
     sku_filter: list[str] | None = None,
 ) -> dict:
-    """Build a MongoDB filter dict from the given field choices and filter values."""
     query: dict = {"flags.inStock": True}
     and_clauses = []
 
@@ -457,7 +436,6 @@ def _run_query(query: dict, limit: int = 200) -> list:
 
 
 def _apply_weight_filter(products: list, weight_filter: float) -> list:
-    """Post-filter by weight ceiling (handles string/float stored values)."""
     result = []
     for p in products:
         try:
@@ -470,7 +448,6 @@ def _apply_weight_filter(products: list, weight_filter: float) -> list:
 
 
 async def _resolve_currency_from_ip(ip: str) -> str:
-    """Look up the currency for a client IP using ip-api.com (free, no key needed)."""
     try:
         async with httpx.AsyncClient(timeout=3) as geo_client:
             resp = await geo_client.get(f"http://ip-api.com/json/{ip}?fields=currency,status")
@@ -485,7 +462,7 @@ async def _resolve_currency_from_ip(ip: str) -> str:
     return DEFAULT_CURRENCY
 
 
-async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_code: str = ""):  # country_code kept for caller compatibility
+async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_code: str = ""):
     """Search products from MongoDB with progressive field fallback."""
     try:
         colors, materials, constructions, styles, sizes, price_filter, weight_filter, generics = _parse_keyword_filters(keyword)
@@ -495,19 +472,15 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
         color_sku_scores: dict = {}
         query_colors = colors[:]
 
-        # If user asked for colors, first resolve matching SKUs from product_color.
         if colors:
             logger.info(f"Attempting product_color lookup for colors={colors}")
             color_sku_filter, color_sku_scores = _resolve_color_sku_scores(colors)
             if color_sku_filter:
                 logger.info(f"Found {len(color_sku_filter)} color-matched SKUs from product_color")
-                # Color filtering is now handled by SKU shortlist from product_color.
                 query_colors = []
             else:
                 logger.info(f"No SKU matched in product_color for colors={colors}")
 
-        # Field fallback sequences per filter type
-        # Color: single color → try single field first, then multi; multiple colors → multi only
         if len(query_colors) == 1:
             color_fields = ["search.color.single", "search.color.multi", None]
         elif len(query_colors) > 1:
@@ -515,10 +488,8 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
         else:
             color_fields = [None]
 
-        # Size: exact match → group match
         size_fields = ["search.size.exact", "search.size.group", None] if sizes else [None]
 
-        # Material: primary → family → details
         material_fields = (
             ["search.material.primary", "search.material.family", "search.material.details", None]
             if materials else [None]
@@ -526,7 +497,6 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
 
         results = []
 
-        # Try all combinations in order, stop at first non-empty result
         for c_field in color_fields:
             if results:
                 break
@@ -550,19 +520,16 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
                         )
                         break
 
-        # Fallback: price / weight only (drop keyword filters)
         if not results and (price_filter or weight_filter):
             query = _build_mongo_query(None, [], None, [], None, [], [], [], price_filter, [], color_sku_filter)
             results = _run_query(query)
 
-        # Final fallback: any in-stock product (skip for explicit color queries)
         if not results and not colors:
             results = _run_query({"flags.inStock": True})
 
         if not results:
             return {"error": "No products found."}
 
-        # Weight is post-filtered in Python (may be stored as string in DB)
         if weight_filter is not None:
             results = _apply_weight_filter(results, weight_filter)
 
@@ -570,7 +537,6 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
         currency_field = CURRENCY_FIELDS.get(currency, "INR_MRP")
 
         if color_sku_scores:
-            # Prefer products with highest matched requested color percentage after all filters.
             results = sorted(
                 results,
                 key=lambda p: (
@@ -587,6 +553,7 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
         else:
             unique_results = _dedupe_products_by_sku(results)
             selected = random.sample(unique_results, min(3, len(unique_results)))
+
         formatted = []
         for p in selected:
             raw = p.get("raw", {})
