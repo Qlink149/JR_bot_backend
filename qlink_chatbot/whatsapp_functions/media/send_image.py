@@ -2,12 +2,11 @@ import json
 
 import httpx
 
-from qlink_chatbot.constants import GUPSHUP_SOURCE
 from qlink_chatbot.utils.env_load import (
     default_country_code,
-    gupshup_api_key,
-    gupshup_app_name,
-    gupshup_source,
+    qlink_gupshup_api_key,
+    qlink_gupshup_app_name,
+    qlink_gupshup_source,
 )
 from qlink_chatbot.utils.logger_config import logger
 
@@ -31,7 +30,7 @@ def send_image_message(phone_number: str, bot_response: dict):
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
-        "apikey": gupshup_api_key,
+        "apikey": qlink_gupshup_api_key,
     }
 
     # Create image message payload
@@ -44,10 +43,10 @@ def send_image_message(phone_number: str, bot_response: dict):
 
     data = {
         "channel": "whatsapp",
-        "source": gupshup_source or GUPSHUP_SOURCE,
+        "source": qlink_gupshup_source,
         "destination": destination,
         "message": json.dumps(message_payload),
-        "src.name": gupshup_app_name,
+        "src.name": qlink_gupshup_app_name,
     }
 
     try:

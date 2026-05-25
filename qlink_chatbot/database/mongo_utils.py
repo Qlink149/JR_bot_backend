@@ -114,14 +114,15 @@ def update_session_country(session_id: str, country_code: str):
         logger.error("Error updating session country", extra={"error": e})
         raise e
 
-def toggle_ai(session_id: str):
+def toggle_ai(session_id: str, collection_name: str = "users"):
     """Toggle the is_ai status of a session."""
     try:
-        session = sessions_collection.find_one({"session_id": session_id})
+        session_collection = _get_sessions_collection(collection_name)
+        session = session_collection.find_one({"session_id": session_id})
         if not session:
             return None
         new_status = not session.get("is_ai", True)
-        sessions_collection.update_one(
+        session_collection.update_one(
             {"session_id": session_id},
             {"$set": {"is_ai": new_status, "updated_at": datetime.utcnow()}}
         )

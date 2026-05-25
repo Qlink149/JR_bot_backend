@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 from openai import AsyncOpenAI
 
@@ -17,7 +18,7 @@ from qlink_chatbot.utils.jaipur_rugs_api import jaipur_rugs_product_search
 from qlink_chatbot.utils.logger_config import logger
 
 API_KEY = os.getenv("OPENAI_API_KEY")
-client = AsyncOpenAI(api_key=API_KEY)
+client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
 
 output_schema = {
     "format": {
@@ -161,6 +162,8 @@ async def chat_agent(
     """Main Jaipur Rugs chatbot agent."""
     response = None
     try:
+        if not client:
+            raise RuntimeError("OPENAI_API_KEY is not configured.")
         system_prompt_variable = return_system_prompt()
         if system_prompt_variable:
             system_prompt = build_system_prompt(
@@ -174,8 +177,13 @@ async def chat_agent(
             
 
 
+        _IST = timezone(timedelta(hours=5, minutes=30))
+        _now_ist = datetime.now(_IST)
+        _ist_time_str = _now_ist.strftime("%A, %I:%M %p IST")
+
         input_list = [
             {"role": "developer", "content": f"Chat history:\n{format_recent_chat_for_ai(chat_history)}"},
+            {"role": "developer", "content": f"Current date and time: {_ist_time_str}"},
             {"role": "developer", "content": f"users country code: {country_code}"},
             {
                 "role": "developer",
@@ -185,7 +193,7 @@ async def chat_agent(
             {"role": "developer", "content": "When responding: do not add any narrative, status updates, waiting messages, politeness fillers, or redundant sentences. Either answer directly or call a tool directly."},
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
             {"role": "developer", "content": "If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For currency requests, use exact values from `mrp` for INR, AED, AUD, CHF, EUR, GBP, SGD, USD. Do not convert between currencies, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
-            {"role": "developer", "content": "For any product-related response (recommendations, product details, price, size, material, SKU, or link), append this exact line at the very end of the message: 'You can search more products here: https://www.jaipurrugs.com/search?k=asl-01'"},
+            {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, or any non-product response."},
             {"role": "user", "content": user_message}
         ]
 
@@ -206,9 +214,11 @@ async def chat_agent(
         input_list += response.output
 
 
-        # Step 2: Handle tool calls
+        # Step 2: Handle tool calls — collect ALL outputs before calling model again
+        has_tool_calls = False
         for item in response.output:
             if item.type == "function_call":
+                has_tool_calls = True
                 args = json.loads(item.arguments)
                 output = ""
                 if item.name == "jaipur_rugs_product_search":
@@ -221,7 +231,7 @@ async def chat_agent(
                         collection_name=collection_name,
                     )
                     output = json.dumps(products)
-                    
+
                 elif item.name == "save_user_name":
                     name = args.get("name")
                     save_user_name(
@@ -254,16 +264,16 @@ async def chat_agent(
                     "output": output
                 })
 
+        # Step 3: Final model response — called ONCE after all tool outputs are collected
+        if has_tool_calls:
+            response = await client.responses.create(
+                model="gpt-4.1-mini",
+                instructions=system_prompt,
+                input=input_list,
+                text=output_schema
+            )
 
-                # Step 3: Final model response using tool output
-                response = await client.responses.create(
-                    model="gpt-4.1-mini",
-                    instructions=system_prompt,
-                    input=input_list,
-                    text=output_schema
-                )
-
-                logger.info("model response", extra={"response": response})
+            logger.info("model response", extra={"response": response})
 
         output = json.loads(response.output[0].content[0].text)
         return output.get("message")
