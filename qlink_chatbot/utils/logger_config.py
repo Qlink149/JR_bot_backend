@@ -10,10 +10,13 @@ from qlink_chatbot.constants import SKIP_FIELDS_LOGGER
 
 
 class SingletonLogger:
+    """A singleton logger to ensure only one instance is created."""
+
     _instance = None
     _lock = Lock()
 
     def __new__(cls, *args, **kwargs):
+        """Ensures that only a single instance of the SingletonLogger exists."""
         with cls._lock:
             if not cls._instance:
                 cls._instance = super().__new__(cls, *args, **kwargs)
@@ -25,6 +28,7 @@ class SingletonLogger:
         self.logger.setLevel(logging.DEBUG)
         self.logger.propagate = False
 
+        # Reuse the existing logger instance during hot reloads/import retries.
         if self.logger.handlers:
             return
 
@@ -35,8 +39,7 @@ class SingletonLogger:
         stream_handler.setFormatter(formatter)
         self.logger.addHandler(stream_handler)
 
-        # Vercel production filesystem is read-only.
-        # File logging only works safely in /tmp.
+        # Vercel production filesystem is read-only. File logging only works in /tmp.
         log_dir = os.getenv("LOG_DIR", "/tmp/logs")
         log_file_path = os.path.join(log_dir, "app.log")
 
@@ -47,12 +50,17 @@ class SingletonLogger:
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
         except OSError:
-            # Never crash app because of logging
-            self.logger.warning("File logging disabled because filesystem is read-only.")
+            self.logger.warning(
+                "File logging disabled because filesystem is read-only."
+            )
 
 
 class JsonFormatter(logging.Formatter):
+    """Custom JSON formatter for logging in pretty-printed JSON format."""
+
     def format(self, record: logging.LogRecord):
+        """Format log records as pretty-printed JSON."""
+        # Base log data with only the required fields
         log_data = {
             "logged_at": datetime.now().isoformat(),
             "level": record.levelname,
@@ -62,30 +70,35 @@ class JsonFormatter(logging.Formatter):
             "line_number": record.lineno,
         }
 
+        # Include extra fields dynamically, excluding unnecessary ones
         extra_fields = {
             key: value
             for key, value in vars(record).items()
             if key not in SKIP_FIELDS_LOGGER
         }
-
         log_data.update(extra_fields)
 
+        # Handle non-serializable data like ObjectId or datetime
         def custom_serializer(obj):
             if isinstance(obj, ObjectId):
                 return str(obj)
             elif isinstance(obj, datetime):
                 return obj.isoformat()
+            elif hasattr(obj, "__dict__"):
+                return str(obj)
             elif hasattr(obj, "model"):
                 return {
                     "model": getattr(obj, "model", None),
                     "usage": getattr(obj, "usage", None),
                 }
-            elif hasattr(obj, "__dict__"):
-                return str(obj)
-
             return f"<Unserializable object of type {obj.__class__.__name__}>"
 
-        return json.dumps(log_data, indent=2, default=custom_serializer) + "\n**************\n"
+        # Return as JSON
+        return (
+            json.dumps(log_data, indent=2, default=custom_serializer)
+            + "\n**************\n"
+        )
 
 
+# Create a single logger instance
 logger = SingletonLogger().logger
