@@ -13,7 +13,7 @@ from qlink_chatbot.database.mongo_utils import (
 )
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
-from qlink_chatbot.whatsapp_functions.send_typing_indicator import send_typing_indicator
+from qlink_chatbot.whatsapp_functions.send_typing_indicator import typing_indicator_loop
 
 whatsapp_router = APIRouter()
 WHATSAPP_COLLECTION_NAME = "users_whatsapp"
@@ -275,16 +275,24 @@ async def _process_message(request_data: dict) -> None:
                         extra={"phone_number": phone_number})
             return
 
-        send_typing_indicator(phone_number=phone_number)
-
-        bot_text = await chat_agent(
-            chat_history=session.get("chat_history", []),
-            user_message=user_text,
-            session_id=session_id,
-            country_code=session.get("country_code", ""),
-            client_ip="",
-            collection_name=WHATSAPP_COLLECTION_NAME,
-        )
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(typing_indicator_loop(phone_number, stop_typing))
+        try:
+            bot_text = await chat_agent(
+                chat_history=session.get("chat_history", []),
+                user_message=user_text,
+                session_id=session_id,
+                country_code=session.get("country_code", ""),
+                client_ip="",
+                collection_name=WHATSAPP_COLLECTION_NAME,
+            )
+        finally:
+            stop_typing.set()
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
 
         bot_text = bot_text or "Sorry, I could not generate a response right now."
         save_message(session_id=session_id, role="assistant", content=bot_text,
