@@ -4,7 +4,7 @@ import time
 import uuid
 
 from docx import Document
-from fastapi import APIRouter, Body, File, UploadFile, Header
+from fastapi import APIRouter, Body, File, Request, UploadFile, Header
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
 from qlink_chatbot.utils.cloudflare_client import s3
@@ -41,6 +41,18 @@ def short_id():
 def ping():
     logger.info("Ping endpoint called")
     return {"message": "Jaipur Rugs web backend API is up and running"}
+
+
+@general_router.get("/geo")
+async def geo_check(request: Request, ip: str = ""):
+    """Check what country/currency would be detected for an IP.
+
+    Pass ?ip=1.2.3.4 to test a specific IP, or leave blank to use your own.
+    """
+    from qlink_chatbot.utils.geo_utils import get_geo
+    target_ip = ip or request.client.host
+    result = await get_geo(target_ip)
+    return {"ip": target_ip, **result}
 
 @general_router.post("/login")
 async def agent_login_route(payload: dict):

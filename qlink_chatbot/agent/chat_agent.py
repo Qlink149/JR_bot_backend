@@ -158,6 +158,7 @@ async def chat_agent(
     country_code,
     client_ip="",
     collection_name: str = "users",
+    detected_currency: str = "",
 ):
     """Main Jaipur Rugs chatbot agent."""
     response = None
@@ -185,6 +186,7 @@ async def chat_agent(
             {"role": "developer", "content": f"Chat history:\n{format_recent_chat_for_ai(chat_history)}"},
             {"role": "developer", "content": f"Current date and time: {_ist_time_str}"},
             {"role": "developer", "content": f"users country code: {country_code}"},
+            {"role": "developer", "content": f"User's detected local currency: {detected_currency or 'INR'}. Show product prices in this currency by default unless the user explicitly asks for a different one."},
             {
                 "role": "developer",
                 "content": f"user name: {user_name(session_id=session_id, collection_name=collection_name)}",

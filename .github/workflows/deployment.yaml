@@ -17,12 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.branch }}
 
       - name: Configure SSH
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
@@ -38,7 +38,7 @@ jobs:
           docker push $REGISTRY_PATH:latest
 
       - name: Setup Password-Based SSH Connection to Vultr Server
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: "65.20.74.206"   # Use the IPv4 address of your Vultr server here
           username: root  # Your Vultr server username
@@ -74,19 +74,10 @@ jobs:
               -e R2_SECRET_KEY=${{ secrets.R2_SECRET_KEY }} \
               -e WHAPI_TOKEN=${{ secrets.WHAPI_TOKEN }} \
               -e WEBHOOK_API=${{ secrets.WEBHOOK_API }} \
-              -e QLINK_GUPSHUP_APP_ID=${{ secrets.QLINK_GUPSHUP_APP_ID }} \
-              -e QLINK_GUPSHUP_PARTNER_APP_TOKEN=${{ secrets.QLINK_GUPSHUP_PARTNER_APP_TOKEN }} \
-              -e QLINK_GUPSHUP_SOURCE=${{ secrets.QLINK_GUPSHUP_SOURCE }} \
-              -e QLINK_GUPSHUP_APP_NAME=${{ secrets.QLINK_GUPSHUP_APP_NAME }} \
-              -e JR_API_USERNAME=${{ secrets.JR_API_USERNAME }} \
-              -e JR_API_PASSWORD=${{ secrets.JR_API_PASSWORD }} \
-              -e JR_API_CLIENT_ID=${{ secrets.JR_API_CLIENT_ID }} \
-              -e JR_API_CLIENT_SECRET=${{ secrets.JR_API_CLIENT_SECRET }} \
-              -e CORS_ORIGINS=${{ secrets.CORS_ORIGINS }} \
               sgp.vultrcr.com/qlink01/jr_backend
 
       - name: Cleanup Old Images
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: "65.20.74.206"   # Use the IPv4 address of your Vultr server here
           username: root  # Your Vultr server username

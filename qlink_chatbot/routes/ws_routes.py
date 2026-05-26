@@ -12,8 +12,9 @@ from qlink_chatbot.database.mongo_utils import (
     get_session_by_id,
     save_message,
     update_session_country,
-    reset_is_ai_true
+    reset_is_ai_true,
 )
+from qlink_chatbot.utils.geo_utils import get_geo, currency_for_country
 from qlink_chatbot.database.pinecone_utils import store_vector_summary
 from qlink_chatbot.utils.logger_config import logger
 
@@ -45,11 +46,25 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
     await websocket.accept()
     logger.info(f"User connected: {session_id} - {name} from {country_code}")
 
+    client_ip = websocket.client.host if websocket.client else ""
     session = get_session_by_id(session_id=session_id)
     if not session:
-        create_session(session_id=session_id, country_code=country_code, name=name, is_ai=True)
-    elif session.get("country_code") != country_code:
-        update_session_country(session_id=session_id, country_code=country_code)
+        geo = await get_geo(client_ip)
+        # Use geo country if frontend didn't pass one
+        resolved_country = country_code or geo.get("country_code", "")
+        create_session(
+            session_id=session_id,
+            country_code=resolved_country,
+            name=name,
+            is_ai=True,
+            geo=geo,
+        )
+        session = {"chat_history": [], "country_code": resolved_country, "geo": geo}
+    else:
+        geo = session.get("geo") or {}
+        resolved_country = session.get("country_code") or country_code
+        if resolved_country and resolved_country != session.get("country_code"):
+            update_session_country(session_id=session_id, country_code=resolved_country)
 
     if session_id not in active_connections:
         active_connections[session_id] = {"user": websocket, "agents": [], "agent_msgs": []}
@@ -90,12 +105,14 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     await a.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 await websocket.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 
+                detected_currency = geo.get("currency") or currency_for_country(resolved_country)
                 response = await chat_agent(
                     chat_history=session.get("chat_history", []),
                     user_message=message["content"],
                     session_id=session_id,
-                    country_code=country_code,
-                    client_ip=websocket.client.host if websocket.client else ""
+                    country_code=resolved_country,
+                    client_ip=client_ip,
+                    detected_currency=detected_currency,
                 )
 
                 # Assistant stops typing
