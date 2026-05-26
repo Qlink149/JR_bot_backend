@@ -10,10 +10,14 @@ from qlink_chatbot.database.mongo_utils import (
     get_session_by_id,
     save_message,
     save_user_name,
+    whatsapp_status_events_collection,
 )
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
-from qlink_chatbot.whatsapp_functions.send_typing_indicator import typing_indicator_loop
+from qlink_chatbot.whatsapp_functions.send_typing_indicator import (
+    send_typing_indicator,
+    typing_indicator_loop,
+)
 
 whatsapp_router = APIRouter()
 WHATSAPP_COLLECTION_NAME = "users_whatsapp"
@@ -103,15 +107,19 @@ def _build_whatsapp_responses(text: str) -> list[dict]:
             # clean again — _extract_cta can leave stray * markers or empty bullets
             caption = re.sub(r'(?m)^\s*[-·•·]\s*[\*_]*\s*$', '', caption)
             caption = _clean_for_whatsapp(caption)
-            responses.append({"type": "image", "image_url": image_url, "caption": caption})
             if product_url and product_url not in seen_product_urls:
                 seen_product_urls.add(product_url)
+                # Merge image + View Product button into ONE interactive message
+                # so image and button always arrive together in correct order
                 responses.append({
                     "type": "interactive_cta",
+                    "image_url": image_url,
                     "button_url": product_url,
-                    "caption": "Tap below to view this rug on Jaipur Rugs.",
+                    "caption": caption or "Tap below to view this rug on Jaipur Rugs.",
                     "button_text": "View Product",
                 })
+            else:
+                responses.append({"type": "image", "image_url": image_url, "caption": caption})
         else:
             cleaned, search_url, btn_label = _extract_search_cta(block)
             if search_url:
@@ -133,6 +141,15 @@ def _build_whatsapp_responses(text: str) -> list[dict]:
         responses.append(deferred_search_cta)
 
     return responses or [{"type": "text", "text": text}]
+
+
+def _has_product_send(responses: list[dict]) -> bool:
+    product_response_types = {"image", "interactive_cta", "product_template", "text_with_image"}
+    return any(
+        isinstance(response, dict)
+        and response.get("type") in product_response_types
+        for response in responses
+    )
 
 
 def _extract_event(request_data: dict) -> dict:
@@ -174,6 +191,7 @@ def _extract_gupshup_message(request_data: dict) -> dict:
         "from": phone,
         "text": (text or "").strip(),
         "name": (payload.get("sender") or {}).get("name", ""),
+        "message_id": payload.get("id", "") or content.get("id", ""),
     }
 
 
@@ -222,6 +240,19 @@ async def _process_message(request_data: dict) -> None:
         statuses = whatsapp_event.get("statuses", [])
         if statuses:
             status = statuses[0].get("type") or statuses[0].get("status")
+            try:
+                whatsapp_status_events_collection.insert_one(
+                    {
+                        "status": status,
+                        "statuses": statuses,
+                        "raw_event": whatsapp_event,
+                    }
+                )
+            except Exception as status_save_error:
+                logger.warning(
+                    "Failed to persist WhatsApp status callback",
+                    extra={"error": str(status_save_error)},
+                )
             logger.info(
                 "Ignoring status callback",
                 extra={"status": status, "statuses": statuses},
@@ -233,11 +264,13 @@ async def _process_message(request_data: dict) -> None:
             phone_number = gupshup_message.get("from", "")
             whatsapp_username = gupshup_message.get("name", "")
             user_text = gupshup_message.get("text", "")
+            message_id = gupshup_message.get("message_id", "")
         elif incoming_messages:
             incoming_message = incoming_messages[0]
             phone_number = incoming_message.get("from", "")
             whatsapp_username = _extract_username(whatsapp_event)
             user_text = _extract_user_message_text(incoming_message)
+            message_id = incoming_message.get("id", "")
         else:
             logger.info("No incoming messages in webhook payload")
             return
@@ -276,7 +309,7 @@ async def _process_message(request_data: dict) -> None:
             return
 
         stop_typing = asyncio.Event()
-        typing_task = asyncio.create_task(typing_indicator_loop(phone_number, stop_typing))
+        typing_task = asyncio.create_task(typing_indicator_loop(message_id, stop_typing))
         try:
             bot_text = await chat_agent(
                 chat_history=session.get("chat_history", []),
@@ -299,6 +332,8 @@ async def _process_message(request_data: dict) -> None:
                      collection_name=WHATSAPP_COLLECTION_NAME)
 
         responses = _build_whatsapp_responses(bot_text)
+        if _has_product_send(responses):
+            await send_typing_indicator(message_id)
         dispatch_whatsapp_responses(phone_number=phone_number, bot_responses=responses)
 
     except Exception as e:

@@ -1,61 +1,63 @@
 import asyncio
-import json
 
 import httpx
 
 from qlink_chatbot.utils.env_load import (
-    default_country_code,
-    qlink_gupshup_api_key,
-    qlink_gupshup_app_name,
-    qlink_gupshup_source,
+    qlink_gupshup_app_id,
+    qlink_gupshup_partner_app_token,
 )
 from qlink_chatbot.utils.logger_config import logger
 
-
-def _normalize_destination(phone_number: str) -> str:
-    digits = "".join(ch for ch in str(phone_number) if ch.isdigit())
-    if len(digits) == 10:
-        return f"{default_country_code}{digits}"
-    return digits
+PARTNER_BASE_URL = "https://partner.gupshup.io"
 
 
-async def send_typing_indicator(phone_number: str) -> None:
-    """Send a WhatsApp typing indicator via Gupshup so the user sees '...' while the bot processes.
+async def send_typing_indicator(message_id: str) -> None:
+    """Mark an inbound WhatsApp message as read and show typing via Gupshup.
 
-    Fails silently — a failed indicator must never block the actual AI response.
+    This must use the Partner API with the inbound message id. Sending a
+    notification payload through the normal message API appears as visible text.
     """
-    try:
-        destination = _normalize_destination(phone_number)
-        url = "https://api.gupshup.io/wa/api/v1/msg"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "apikey": qlink_gupshup_api_key,
-        }
-        data = {
-            "channel": "whatsapp",
-            "source": qlink_gupshup_source,
-            "destination": destination,
-            "message": json.dumps({"type": "notification", "payload": {"type": "typing"}}),
-            "src.name": qlink_gupshup_app_name,
-        }
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(url, headers=headers, data=data)
+    if not message_id or not qlink_gupshup_app_id or not qlink_gupshup_partner_app_token:
         logger.info(
-            "Typing indicator sent",
-            extra={"phone_number": phone_number, "status_code": response.status_code},
+            "Skipping WhatsApp typing indicator; missing message id or Gupshup partner config",
+            extra={"message_id_present": bool(message_id)},
         )
+        return
+
+    url = f"{PARTNER_BASE_URL}/partner/app/{qlink_gupshup_app_id}/v1/event"
+    headers = {
+        "Authorization": qlink_gupshup_partner_app_token,
+        "token": qlink_gupshup_partner_app_token,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "type": "message-event",
+        "message": {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+            "typing_indicator": {"type": "text"},
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(url, headers=headers, json=payload)
+        if response.status_code >= 400:
+            logger.warning(
+                "WhatsApp typing indicator failed",
+                extra={
+                    "status_code": response.status_code,
+                    "response": response.text[:500],
+                },
+            )
+            return
+        logger.info("WhatsApp typing indicator sent", extra={"status_code": response.status_code})
     except Exception as e:
-        logger.warning(
-            "Typing indicator failed (non-fatal)",
-            extra={"phone_number": phone_number, "error": str(e)},
-        )
+        logger.warning("WhatsApp typing indicator failed", extra={"error": str(e)})
 
 
-async def typing_indicator_loop(phone_number: str, stop_event: asyncio.Event) -> None:
-    """Keep sending typing indicator every 4 seconds until stop_event is set."""
-    while not stop_event.is_set():
-        await send_typing_indicator(phone_number)
-        try:
-            await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=4)
-        except asyncio.TimeoutError:
-            pass
+async def typing_indicator_loop(message_id: str, stop_event: asyncio.Event) -> None:
+    """Send one typing indicator; WhatsApp hides it on reply or after about 25s."""
+    await send_typing_indicator(message_id)
+    await stop_event.wait()

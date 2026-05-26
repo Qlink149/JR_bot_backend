@@ -74,6 +74,15 @@ jobs:
               -e R2_SECRET_KEY=${{ secrets.R2_SECRET_KEY }} \
               -e WHAPI_TOKEN=${{ secrets.WHAPI_TOKEN }} \
               -e WEBHOOK_API=${{ secrets.WEBHOOK_API }} \
+              -e QLINK_GUPSHUP_APP_ID=${{ secrets.QLINK_GUPSHUP_APP_ID }} \
+              -e QLINK_GUPSHUP_PARTNER_APP_TOKEN=${{ secrets.QLINK_GUPSHUP_PARTNER_APP_TOKEN }} \
+              -e QLINK_GUPSHUP_SOURCE=${{ secrets.QLINK_GUPSHUP_SOURCE }} \
+              -e QLINK_GUPSHUP_APP_NAME=${{ secrets.QLINK_GUPSHUP_APP_NAME }} \
+              -e JR_API_USERNAME=${{ secrets.JR_API_USERNAME }} \
+              -e JR_API_PASSWORD=${{ secrets.JR_API_PASSWORD }} \
+              -e JR_API_CLIENT_ID=${{ secrets.JR_API_CLIENT_ID }} \
+              -e JR_API_CLIENT_SECRET=${{ secrets.JR_API_CLIENT_SECRET }} \
+              -e CORS_ORIGINS=${{ secrets.CORS_ORIGINS }} \
               sgp.vultrcr.com/qlink01/jr_backend
 
       - name: Cleanup Old Images

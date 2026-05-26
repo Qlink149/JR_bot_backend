@@ -550,13 +550,31 @@ async def jaipur_rugs_product_search(keyword: str, client_ip: str = "", country_
                         )
                         break
 
+        # Style fallback: search style keywords in product name/collection/design text
+        # (JR API may not populate the Style field consistently)
+        if not results and styles:
+            style_generics = styles[:]
+            query = _build_mongo_query(
+                None, query_colors,
+                None, sizes,
+                None, materials,
+                constructions, [],
+                price_filter, generics + style_generics,
+                color_sku_filter,
+            )
+            results = _run_query(query)
+            if results:
+                logger.info(f"Style text-fallback found {len(results)} products for styles={styles}")
+
         # Fallback: price / weight only (drop keyword filters)
         if not results and (price_filter or weight_filter):
             query = _build_mongo_query(None, [], None, [], None, [], [], [], price_filter, [], color_sku_filter)
             results = _run_query(query)
 
-        # Final fallback: any in-stock product (skip for explicit color queries)
-        if not results and not colors:
+        # Final fallback: any in-stock product — ONLY when no specific filters were given
+        # (never return random products when the user asked for something specific)
+        has_specific_filter = any([colors, styles, materials, constructions, sizes, generics])
+        if not results and not has_specific_filter:
             results = _run_query({"flags.inStock": True})
 
         if not results:

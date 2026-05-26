@@ -46,20 +46,6 @@ def dispatch_whatsapp_responses(phone_number: str, bot_responses):
 
         response_type = response.get("type", "text")
 
-        if (
-            response_type == "interactive_cta"
-            and previous_response_type == "image"
-            and IMAGE_TO_CTA_DELAY_SECONDS > 0
-        ):
-            logger.info(
-                "Waiting before CTA send so image media renders first",
-                extra={
-                    "phone_number": phone_number,
-                    "delay_seconds": IMAGE_TO_CTA_DELAY_SECONDS,
-                },
-            )
-            time.sleep(IMAGE_TO_CTA_DELAY_SECONDS)
-
         if response_type == "image":
             send_image_message(phone_number=phone_number, bot_response=response)
             previous_response_type = response_type

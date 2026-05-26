@@ -1,8 +1,9 @@
 import json
+import os
 from datetime import datetime
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from qlink_chatbot.agent.utils.chat_agent_prompts import (
@@ -17,7 +18,7 @@ from qlink_chatbot.database.mongo_utils import (
     whatsapp_sessions_collection,
 )
 from qlink_chatbot.utils.jr_api_client import get_all_products as _jr_get_all_products
-from qlink_chatbot.utils.env_load import gupshup_source
+from qlink_chatbot.utils.env_load import qlink_gupshup_source
 from qlink_chatbot.utils.jaipur_rugs_api import products_collection as website_products_collection
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 
@@ -101,7 +102,7 @@ def get_stats():
         "total_messages": inbound + outbound,
         "inbound_messages": inbound,
         "outbound_messages": outbound,
-        "whatsapp_number": gupshup_source,
+        "whatsapp_number": qlink_gupshup_source,
     }
 
 
@@ -512,6 +513,62 @@ def toggle_conversation_ai(phone: str):
     if new_status is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"phone": phone, "is_ai": new_status}
+
+
+_CRON_SECRET = os.getenv("CRON_SECRET", "")
+
+
+@dashboard_router.get("/cron/sync-products")
+async def cron_sync_products(authorization: str = Header(default="")):
+    """Called by Vercel Cron on a schedule to keep the products collection fresh.
+
+    Vercel sends: Authorization: Bearer <CRON_SECRET>
+    Set CRON_SECRET in Vercel env vars.
+    """
+    expected = f"Bearer {_CRON_SECRET}"
+    if _CRON_SECRET and authorization != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    products = await _jr_get_all_products()
+    synced = 0
+    skipped = 0
+    for p in products:
+        barcode = p.get("BarCode")
+        if not barcode:
+            skipped += 1
+            continue
+        doc = {
+            "raw": p,
+            "BarCode": barcode,
+            "SKU": p.get("SKU"),
+            "flags": {
+                "inStock": bool(p.get("LiveStatus")) and bool(p.get("Published")),
+            },
+            "search": {
+                "color": {"single": p.get("GrColor", ""), "multi": p.get("ColorFamily", "")},
+                "material": {
+                    "primary": p.get("Material", ""),
+                    "family": p.get("MaterialFamilies", ""),
+                    "details": p.get("MaterialDetails", ""),
+                },
+                "size": {"exact": p.get("SizeInFT", ""), "group": p.get("SizeGroupInFT", "")},
+                "construction": p.get("Construction", ""),
+                "style": p.get("Style", ""),
+                "shape": p.get("Shape", ""),
+                "price": p.get("INR_MRP"),
+                "quality": p.get("Quality", ""),
+                "weight": p.get("Weight", 0.0),
+                "room": [r.strip() for r in (p.get("Room") or "").split(",") if r.strip()],
+            },
+            "updated_at": datetime.utcnow(),
+        }
+        website_products_collection.update_one(
+            {"BarCode": barcode},
+            {"$set": doc, "$setOnInsert": {"created_at": datetime.utcnow()}},
+            upsert=True,
+        )
+        synced += 1
+    return {"synced": synced, "skipped": skipped, "triggered_by": "cron"}
 
 
 @dashboard_router.delete("/catalog/designs/{design_id}/recommendation")
