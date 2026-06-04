@@ -10,6 +10,7 @@ from qlink_chatbot.agent.summariser_agent import summariser_agent
 from qlink_chatbot.database.mongo_utils import (
     create_session,
     get_session_by_id,
+    raise_alert,
     save_message,
     update_session_country,
     reset_is_ai_true,
@@ -27,6 +28,16 @@ ws_router = APIRouter()
 
 active_connections: dict[str, dict[str, any]] = {}
 admin_connections: set[WebSocket] = set()
+
+CUSTOM_RUG_IMAGE_RESPONSE = (
+    "Thanks for sharing your custom rug design. I've shared it with our rug specialist. "
+    "Please share your preferred size, material, budget, and delivery location so they can assist you better."
+)
+
+
+def _is_uploaded_image_message(content: str) -> bool:
+    text = str(content or "").strip().lower()
+    return text.startswith("![image](") or text.startswith("[image]")
 
 
 def _websocket_client_ip(websocket: WebSocket) -> str:
@@ -107,6 +118,23 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
             session = get_session_by_id(session_id=session_id)
             is_ai = session.get("is_ai", False)
             agents = active_connections[session_id]["agents"]
+
+            if _is_uploaded_image_message(message["content"]):
+                raise_alert(
+                    session_id=session_id,
+                    alert_body="User shared custom rug design image",
+                )
+                ai_response = {
+                    "type": "message",
+                    "from": "assistant",
+                    "content": CUSTOM_RUG_IMAGE_RESPONSE,
+                }
+                save_message(session_id, "assistant", ai_response["content"])
+                await websocket.send_json(ai_response)
+                for a in agents:
+                    await a.send_json(message)
+                    await a.send_json(ai_response)
+                continue
 
             if is_ai:
                 # Assistant starts typing

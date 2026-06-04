@@ -375,6 +375,7 @@ def raise_alert(session_id: str, alert_body: str):
     """Raise alert when ai esclate query to the agent."""
     try:
         now = int(time.time())
+        is_callback_request = "callback" in (alert_body or "").lower()
         waiting_count = handoff_requests_collection.count_documents(
             {"status": "waiting"}
         )
@@ -395,6 +396,7 @@ def raise_alert(session_id: str, alert_body: str):
                     "updated_at": now,
                     "queue_position": queue_position,
                     "eta_minutes": eta_minutes,
+                    "callback_requested": is_callback_request,
                 },
             },
             upsert=True,
@@ -408,6 +410,7 @@ def raise_alert(session_id: str, alert_body: str):
                 "queue_position": queue_position,
                 "eta_minutes": eta_minutes,
                 "status": "waiting",
+                "callback_requested": is_callback_request,
             }
         )
         return {

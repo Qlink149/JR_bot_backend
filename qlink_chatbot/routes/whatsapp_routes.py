@@ -8,6 +8,7 @@ from qlink_chatbot.agent.chat_agent import chat_agent
 from qlink_chatbot.database.mongo_utils import (
     create_session,
     get_session_by_id,
+    raise_alert,
     save_message,
     save_user_name,
     try_mark_whatsapp_message_processed,
@@ -23,12 +24,9 @@ from qlink_chatbot.whatsapp_functions.send_typing_indicator import (
 whatsapp_router = APIRouter()
 WHATSAPP_COLLECTION_NAME = "users_whatsapp"
 
-_IMAGE_NOT_SUPPORTED_RESPONSE = (
-    "I'm sorry, I'm not able to identify or process images at this time.\n\n"
-    "For assistance, please reach out to us:\n"
-    "- Email: shop@jaipurrugs.com\n"
-    "- India: +91 8000295928 (WhatsApp available)\n"
-    "- International: +91 7412 060 022 (WhatsApp available)"
+_CUSTOM_RUG_MEDIA_RESPONSE = (
+    "Thanks for sharing your custom rug design. I've shared it with our rug specialist. "
+    "Please share your preferred size, material, budget, and delivery location so they can assist you better."
 )
 _MEDIA_SENTINEL = "__MEDIA_MESSAGE__"
 
@@ -294,9 +292,26 @@ async def _process_message(request_data: dict) -> None:
             return
 
         if user_text == _MEDIA_SENTINEL:
+            session_id = phone_number.lower()
+            save_message(
+                session_id=session_id,
+                role="user",
+                content="[image] Custom rug design attachment",
+                collection_name=WHATSAPP_COLLECTION_NAME,
+            )
+            raise_alert(
+                session_id=session_id,
+                alert_body="User shared custom rug design image",
+            )
+            save_message(
+                session_id=session_id,
+                role="assistant",
+                content=_CUSTOM_RUG_MEDIA_RESPONSE,
+                collection_name=WHATSAPP_COLLECTION_NAME,
+            )
             dispatch_whatsapp_responses(
                 phone_number=phone_number,
-                bot_responses=[{"type": "text", "text": _IMAGE_NOT_SUPPORTED_RESPONSE}],
+                bot_responses=[{"type": "text", "text": _CUSTOM_RUG_MEDIA_RESPONSE}],
             )
             return
 
