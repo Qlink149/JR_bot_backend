@@ -68,35 +68,6 @@ def currency_for_country(country_code: str) -> str:
     return _COUNTRY_CURRENCY.get((country_code or "").upper(), "INR")
 
 
-def iso_for_dial_code(dial_code: str) -> str:
-    """Map frontend country dial code (91, 1, 44) to ISO country code."""
-    return _CALLING_CODE_TO_ISO.get(str(dial_code or "").strip(), "")
-
-
-def currency_for_dial_code(dial_code: str) -> str:
-    """Map frontend country dial code to display currency."""
-    return _CALLING_CODE_TO_CURRENCY.get(str(dial_code or "").strip(), "")
-
-
-def resolve_web_currency(*, dial_code: str, geo: dict | None = None) -> str:
-    """Resolve web chat display currency.
-
-    The frontend passes a country dial code in the WebSocket URL (91, 1, 44…).
-    That selection — which is set from the geo API or the country picker — takes
-    priority over a stale session geo blob or an unmapped ISO lookup.
-    """
-    dial_currency = currency_for_dial_code(dial_code)
-    if dial_currency:
-        return dial_currency
-
-    geo = geo or {}
-    if geo.get("currency"):
-        return geo["currency"]
-
-    iso = iso_for_dial_code(dial_code) or (geo.get("country_code") or "")
-    return currency_for_country(iso)
-
-
 # E.164 calling code (no +) → ISO country code
 _CALLING_CODE_TO_ISO: dict[str, str] = {
     "91": "IN",

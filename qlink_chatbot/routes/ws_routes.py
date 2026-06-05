@@ -14,7 +14,7 @@ from qlink_chatbot.database.mongo_utils import (
     update_session_country,
     reset_is_ai_true,
 )
-from qlink_chatbot.utils.geo_utils import get_geo, iso_for_dial_code, resolve_web_currency
+from qlink_chatbot.utils.geo_utils import get_geo, currency_for_country
 from qlink_chatbot.database.pinecone_utils import store_vector_summary
 from qlink_chatbot.utils.logger_config import logger
 
@@ -54,15 +54,14 @@ async def notify_admins():
 async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name:str):
     session_id = session_id.lower()
     await websocket.accept()
-    dial_code = str(country_code or "").strip()
-    logger.info(f"User connected: {session_id} - {name} dial={dial_code}")
+    logger.info(f"User connected: {session_id} - {name} from {country_code}")
 
     client_ip = _websocket_client_ip(websocket)
     session = get_session_by_id(session_id=session_id)
-    geo = await get_geo(client_ip)
-    resolved_country = iso_for_dial_code(dial_code) or geo.get("country_code", "") or dial_code
-
     if not session:
+        geo = await get_geo(client_ip)
+        # Use geo country if frontend didn't pass one
+        resolved_country = country_code or geo.get("country_code", "")
         create_session(
             session_id=session_id,
             country_code=resolved_country,
@@ -72,10 +71,10 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
         )
         session = {"chat_history": [], "country_code": resolved_country, "geo": geo}
     else:
+        geo = session.get("geo") or {}
+        resolved_country = session.get("country_code") or country_code
         if resolved_country and resolved_country != session.get("country_code"):
             update_session_country(session_id=session_id, country_code=resolved_country)
-        session["country_code"] = resolved_country
-        session["geo"] = geo
 
     if session_id not in active_connections:
         active_connections[session_id] = {"user": websocket, "agents": [], "agent_msgs": []}
@@ -116,7 +115,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     await a.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 await websocket.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 
-                detected_currency = resolve_web_currency(dial_code=dial_code, geo=geo)
+                detected_currency = geo.get("currency") or currency_for_country(resolved_country)
                 response = await chat_agent(
                     chat_history=session.get("chat_history", []),
                     user_message=message["content"],
