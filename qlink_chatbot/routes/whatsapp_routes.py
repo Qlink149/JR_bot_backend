@@ -10,10 +10,9 @@ from qlink_chatbot.database.mongo_utils import (
     get_session_by_id,
     save_message,
     save_user_name,
-    update_session_country,
+    try_mark_whatsapp_message_processed,
     whatsapp_status_events_collection,
 )
-from qlink_chatbot.utils.geo_utils import currency_for_country, parse_whatsapp_phone
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 from qlink_chatbot.whatsapp_functions.send_typing_indicator import (
@@ -27,8 +26,9 @@ WHATSAPP_COLLECTION_NAME = "users_whatsapp"
 _IMAGE_NOT_SUPPORTED_RESPONSE = (
     "I'm sorry, I'm not able to identify or process images at this time.\n\n"
     "For assistance, please reach out to us:\n"
-    "- After-sales/orders: order-update@jaipurrugs.com, +91 7665017083\n"
-    "- Rug care/repair/washing/services: rugcare@jaipurrugs.com, +91 9039195506"
+    "- Email: shop@jaipurrugs.com\n"
+    "- India: +91 8000295928 (WhatsApp available)\n"
+    "- International: +91 7412 060 022 (WhatsApp available)"
 )
 _MEDIA_SENTINEL = "__MEDIA_MESSAGE__"
 
@@ -59,6 +59,7 @@ def _extract_search_cta(text: str) -> tuple[str, str | None, str | None]:
     for match in _MD_LINK_RE.finditer(text):
         label, url = match.group(1), match.group(2)
         if "search" in label.lower() or "browse" in label.lower() or "/search" in url:
+            url = "https://www.jaipurrugs.com/in/search"
             cleaned = _MD_LINK_RE.sub("", text, count=1).strip()
             cleaned = re.sub(r'(?m)^\s*[-·•]\s*$', '', cleaned)
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
@@ -133,23 +134,7 @@ def _build_whatsapp_responses(text: str) -> list[dict]:
                     "button_text": btn_label,
                 }
             else:
-                text = _clean_for_whatsapp(block)
-                text, product_url = _extract_cta(text)
-                if product_url and product_url not in seen_product_urls:
-                    if pending_text:
-                        responses.append({"type": "text", "text": "\n\n".join(pending_text)})
-                        pending_text = []
-                    seen_product_urls.add(product_url)
-                    responses.append({
-                        "type": "interactive_cta",
-                        "button_url": product_url,
-                        "caption": text or "Tap below to view this rug on Jaipur Rugs.",
-                        "button_text": "View Product",
-                    })
-                else:
-                    # Strip any remaining markdown links to plain URLs (WhatsApp doesn't render [text](url))
-                    text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'\2', text)
-                    pending_text.append(text)
+                pending_text.append(_clean_for_whatsapp(block))
 
     if pending_text:
         responses.append({"type": "text", "text": "\n\n".join(pending_text)})
@@ -297,6 +282,17 @@ async def _process_message(request_data: dict) -> None:
                         extra={"phone_number": phone_number})
             return
 
+        if not try_mark_whatsapp_message_processed(
+            message_id=message_id,
+            phone=phone_number,
+            message_text=user_text,
+        ):
+            logger.info(
+                "Skipping duplicate WhatsApp message",
+                extra={"phone_number": phone_number, "message_id": message_id},
+            )
+            return
+
         if user_text == _MEDIA_SENTINEL:
             dispatch_whatsapp_responses(
                 phone_number=phone_number,
@@ -305,33 +301,17 @@ async def _process_message(request_data: dict) -> None:
             return
 
         session_id = phone_number.lower()
-        phone_geo = parse_whatsapp_phone(phone_number)
-        country_iso = phone_geo.get("country_iso", "")
-        detected_currency = phone_geo.get("currency") or currency_for_country(country_iso)
-
         session = get_session_by_id(session_id=session_id,
                                     collection_name=WHATSAPP_COLLECTION_NAME)
 
         if not session:
-            create_session(session_id=session_id, country_code=country_iso,
+            create_session(session_id=session_id, country_code="",
                            name=whatsapp_username, is_ai=True,
                            collection_name=WHATSAPP_COLLECTION_NAME)
-            session = {
-                "chat_history": [],
-                "country_code": country_iso,
-                "detected_currency": detected_currency,
-            }
-        else:
-            if country_iso and country_iso != session.get("country_code", ""):
-                update_session_country(
-                    session_id=session_id,
-                    country_code=country_iso,
-                    collection_name=WHATSAPP_COLLECTION_NAME,
-                )
-                session["country_code"] = country_iso
-            if whatsapp_username and whatsapp_username != session.get("user_name", ""):
-                save_user_name(session_id=session_id, name=whatsapp_username,
-                               collection_name=WHATSAPP_COLLECTION_NAME)
+            session = {"chat_history": [], "country_code": ""}
+        elif whatsapp_username and whatsapp_username != session.get("user_name", ""):
+            save_user_name(session_id=session_id, name=whatsapp_username,
+                           collection_name=WHATSAPP_COLLECTION_NAME)
 
         save_message(session_id=session_id, role="user", content=user_text,
                      collection_name=WHATSAPP_COLLECTION_NAME)
@@ -343,17 +323,14 @@ async def _process_message(request_data: dict) -> None:
 
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(typing_indicator_loop(message_id, stop_typing))
-        resolved_country = session.get("country_code") or country_iso
-        resolved_currency = detected_currency or currency_for_country(resolved_country)
         try:
             bot_text = await chat_agent(
                 chat_history=session.get("chat_history", []),
                 user_message=user_text,
                 session_id=session_id,
-                country_code=resolved_country,
+                country_code=session.get("country_code", ""),
                 client_ip="",
                 collection_name=WHATSAPP_COLLECTION_NAME,
-                detected_currency=resolved_currency,
             )
         finally:
             stop_typing.set()
@@ -379,7 +356,7 @@ async def _process_message(request_data: dict) -> None:
             try:
                 dispatch_whatsapp_responses(
                     phone_number=phone_number,
-                    bot_responses=[{"type": "text", "text": "Sorry, something went wrong on our end. Please try again in a moment."}],
+                    bot_responses=[{"type": "text", "text": "Unexpected error occurred."}],
                 )
             except Exception as send_error:
                 logger.error("Failed to send fallback message",
