@@ -21,8 +21,6 @@ agents_profile = db["agents"]
 inventory_cache_collection = db["inventory_cache"]
 whatsapp_outbound_events_collection = db["whatsapp_outbound_events"]
 whatsapp_status_events_collection = db["whatsapp_status_events"]
-whatsapp_processed_messages_collection = db["whatsapp_processed_messages"]
-handoff_requests_collection = db["handoff_requests"]
 
 
 def _get_sessions_collection(collection_name: str = "users"):
@@ -93,83 +91,31 @@ def create_session(
         session_collection = _get_sessions_collection(collection_name=collection_name)
         doc = {
             "session_id": session_id,
+            "country_code": country_code,
+            "is_ai": is_ai,
             "created_at": now,
+            "updated_at": now,
+            "user_name": name,
             "chat_history": [],
         }
         if geo:
             doc["geo"] = geo
-        set_fields = {
-            "country_code": country_code,
-            "is_ai": is_ai,
-            "updated_at": now,
-            "user_name": name,
-        }
-        if geo:
-            set_fields["geo"] = geo
-        session_collection.update_one(
-            {"session_id": session_id},
-            {
-                "$setOnInsert": doc,
-                "$set": set_fields,
-            },
-            upsert=True,
-        )
+        session_collection.insert_one(doc)
         logger.info(f"Session created: {session_id}")
     except Exception as e:
         logger.error("Error creating session", extra={"error": e})
         raise e
 
-
-def update_visitor_insights(
+def update_session_country(
     session_id: str,
-    insights: dict,
-    browsing_event: dict | None = None,
+    country_code: str,
+    collection_name: str = "users",
 ):
-    """Store visitor metadata against a web chat session."""
-    try:
-        now = datetime.utcnow()
-        insight_fields = {
-            f"visitor_insights.{key}": value
-            for key, value in insights.items()
-            if key != "browsing_history"
-        }
-        update = {
-            "$set": {
-                **insight_fields,
-                "updated_at": now,
-            },
-            "$setOnInsert": {
-                "session_id": session_id,
-                "country_code": insights.get("country_code", ""),
-                "is_ai": True,
-                "created_at": now,
-                "user_name": insights.get("user_name") or "Visitor",
-                "chat_history": [],
-            },
-        }
-
-        if browsing_event:
-            update["$push"] = {
-                "visitor_insights.browsing_history": {
-                    **browsing_event,
-                    "recorded_at": now,
-                }
-            }
-
-        sessions_collection.update_one(
-            {"session_id": session_id},
-            update,
-            upsert=True,
-        )
-    except Exception as e:
-        logger.error("Error updating visitor insights", extra={"error": e})
-        raise e
-
-def update_session_country(session_id: str, country_code: str):
     """Update the country code of an existing session."""
     try:
         now = datetime.utcnow()
-        result = sessions_collection.update_one(
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        result = session_collection.update_one(
             {"session_id": session_id},
             {"$set": {"country_code": country_code, "updated_at": now}}
         )
@@ -231,6 +177,22 @@ def get_session_by_id(session_id: str, collection_name: str = "users"):
         raise e
 
 
+def save_callback_phone(session_id: str, phone: str, collection_name: str = "users"):
+    """Store a callback phone number on the session so agents can see it."""
+    try:
+        now = datetime.utcnow()
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session_collection.update_one(
+            {"session_id": session_id},
+            {"$set": {"callback_phone": phone, "updated_at": now}},
+            upsert=True,
+        )
+        logger.info(f"Saved callback phone for session {session_id}: {phone}")
+    except Exception as e:
+        logger.error("Error saving callback phone", extra={"error": e})
+        raise e
+
+
 def save_user_name(session_id: str, name: str, collection_name: str = "users"):
     """Store or update the user's name in the session."""
     try:
@@ -263,6 +225,7 @@ def save_previous_search(
     search_keyword: str,
     search_results: list,
     collection_name: str = "users",
+    filters: dict | None = None,
 ):
     """Store the user's previous search results in the session.
     Only keeps the last 3 searches.
@@ -281,6 +244,7 @@ def save_previous_search(
                             {
                                 "keyword": search_keyword,
                                 "results": search_results,
+                                "filters": filters or {},
                                 "timestamp": now
                             }
                         ],
@@ -374,47 +338,13 @@ def update_system_prompt(
 def raise_alert(session_id: str, alert_body: str):
     """Raise alert when ai esclate query to the agent."""
     try:
-        now = int(time.time())
-        waiting_count = handoff_requests_collection.count_documents(
-            {"status": "waiting"}
-        )
-        queue_position = waiting_count + 1
-        eta_minutes = max(5, queue_position * 5)
-
-        handoff_requests_collection.update_one(
-            {"session_id": session_id, "status": "waiting"},
-            {
-                "$setOnInsert": {
-                    "session_id": session_id,
-                    "created_at": now,
-                    "status": "waiting",
-                    "callback_requested": False,
-                },
-                "$set": {
-                    "alert": alert_body,
-                    "updated_at": now,
-                    "queue_position": queue_position,
-                    "eta_minutes": eta_minutes,
-                },
-            },
-            upsert=True,
-        )
-
         result = agent_alerts.insert_one(
             {
                 "session_id": session_id,
                 "alert": alert_body,
-                "created_at": now,
-                "queue_position": queue_position,
-                "eta_minutes": eta_minutes,
-                "status": "waiting",
+                "created_at": int(time.time())
             }
         )
-        return {
-            "status": "success",
-            "queue_position": queue_position,
-            "eta_minutes": eta_minutes,
-        }
     except Exception as e:
         logger.error(
             "Error raising agent alert.",
@@ -423,55 +353,6 @@ def raise_alert(session_id: str, alert_body: str):
             }
         )
         raise e
-
-
-def try_mark_whatsapp_message_processed(
-    message_id: str,
-    phone: str,
-    message_text: str = "",
-) -> bool:
-    """Atomically mark a WhatsApp inbound message as processed.
-
-    Returns False when the same provider message id was already handled.
-    """
-    if not message_id:
-        return True
-
-    try:
-        now = datetime.utcnow()
-        key = f"{phone}:{message_id}"
-        result = whatsapp_processed_messages_collection.update_one(
-            {"_id": key},
-            {
-                "$setOnInsert": {
-                    "_id": key,
-                    "message_id": message_id,
-                    "phone": phone,
-                    "message_text": message_text,
-                    "created_at": now,
-                }
-            },
-            upsert=True,
-        )
-        return bool(result.upserted_id)
-    except Exception as e:
-        logger.error(
-            "Error marking WhatsApp message as processed",
-            extra={"error": e, "message_id": message_id, "phone": phone},
-        )
-        return True
-
-
-def mark_handoff_attended(session_id: str):
-    """Mark queue handoff requests as attended when an agent opens/takes over."""
-    try:
-        now = int(time.time())
-        handoff_requests_collection.update_many(
-            {"session_id": session_id, "status": "waiting"},
-            {"$set": {"status": "attended", "attended_at": now, "updated_at": now}},
-        )
-    except Exception as e:
-        logger.error("Error marking handoff attended", extra={"error": e})
 
 def list_all_alerts():
     """Util function to return all alerts."""
@@ -495,16 +376,12 @@ def list_all_alerts():
 def delete_alert_by_id(id: str):
     """Util function to delete alert by id."""
     try:
-        alert = agent_alerts.find_one({"_id": ObjectId(id)})
         result = agent_alerts.delete_one(
             {"_id": ObjectId(id)}
         )
 
         if result.deleted_count == 0:
             return False
-
-        if alert and alert.get("session_id"):
-            mark_handoff_attended(alert.get("session_id"))
 
         return True
     except Exception as e:
