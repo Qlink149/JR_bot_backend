@@ -781,6 +781,7 @@ async def jaipur_rugs_product_search(
     client_ip: str = "",
     country_code: str = "",
     requested_currency: str = "",
+    exclude_skus: set | None = None,
 ):
     """Search products from MongoDB with progressive field fallback."""
     try:
@@ -906,9 +907,19 @@ async def jaipur_rugs_product_search(
                 reverse=True,
             )
             unique_results = _dedupe_products_by_sku(results)
-            selected = unique_results[:3]
         else:
             unique_results = _dedupe_products_by_sku(results)
+
+        if exclude_skus:
+            upper_exclude = {s.upper() for s in exclude_skus if s}
+            unique_results = [
+                p for p in unique_results
+                if _extract_product_sku(p).upper() not in upper_exclude
+            ]
+
+        if color_sku_scores:
+            selected = unique_results[:3]
+        else:
             selected = random.sample(unique_results, min(3, len(unique_results)))
         formatted = []
         for p in selected:
