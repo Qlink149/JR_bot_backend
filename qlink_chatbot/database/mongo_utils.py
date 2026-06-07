@@ -165,11 +165,12 @@ def update_visitor_insights(
         logger.error("Error updating visitor insights", extra={"error": e})
         raise e
 
-def update_session_country(session_id: str, country_code: str):
+def update_session_country(session_id: str, country_code: str, collection_name: str = "users"):
     """Update the country code of an existing session."""
     try:
         now = datetime.utcnow()
-        result = sessions_collection.update_one(
+        session_collection = _get_sessions_collection(collection_name)
+        result = session_collection.update_one(
             {"session_id": session_id},
             {"$set": {"country_code": country_code, "updated_at": now}}
         )

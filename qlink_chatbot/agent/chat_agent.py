@@ -218,7 +218,7 @@ async def chat_agent(
             {"role": "developer", "content": "When responding: do not add any narrative, status updates, waiting messages, politeness fillers, or redundant sentences. Either answer directly or call a tool directly."},
             {"role": "developer", "content": "In greeting or welcome-style replies, ask the customer what rug size they are looking for. For follow-up size questions after products were shown, answer from Latest shown products context when possible. If the user mentions size but does not identify the product, ask which product they mean and what size they prefer."},
             {"role": "developer", "content": "For store, showroom, address, direction, location, or timing questions, call `search_store_locations` before `search_kb`. Use only returned store data. If timing is blank, say timing is not available in the verified store data and offer to connect an agent."},
-            {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
+            {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include ALL returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned. Do NOT number the products — do not add '1.', '2.', '3.' or any numbering prefix. Show each product as a separate block."},
             {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search`; do not recalculate, convert, or pick another MRP value. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
             {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, or any non-product response."},
             {"role": "user", "content": user_message}
@@ -250,16 +250,25 @@ async def chat_agent(
                 output = ""
                 if item.name == "jaipur_rugs_product_search":
                     keyword = args.get("keyword")
+                    # Auto-exclude previously shown SKUs so show-more always returns fresh products
+                    prev_searches = get_previous_search(session_id, collection_name=collection_name)
+                    shown_skus = {
+                        (p.get("SKU") or "").strip().upper()
+                        for search in (prev_searches or [])
+                        for p in (search.get("results") or [])
+                        if isinstance(p, dict) and (p.get("SKU") or "").strip()
+                    }
                     products = await jaipur_rugs_product_search(
                         keyword,
                         client_ip=client_ip,
                         country_code=country_code,
-                        requested_currency=args.get("currency", ""),
+                        requested_currency=args.get("currency", "") or detected_currency,
+                        exclude_skus=shown_skus or None,
                     )
                     save_previous_search(
                         session_id,
                         keyword,
-                        products,
+                        products if isinstance(products, list) else [],
                         collection_name=collection_name,
                     )
                     output = json.dumps(products)
@@ -306,7 +315,10 @@ async def chat_agent(
                 model="gpt-4.1-mini",
                 instructions=system_prompt,
                 input=input_list,
-                text=output_schema
+                text=output_schema,
+                temperature=0.2,
+                max_output_tokens=2048,
+                top_p=1,
             )
 
             logger.info("model response", extra={"response": response})
