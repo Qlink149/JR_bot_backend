@@ -11,25 +11,20 @@ jobs:
     name: Build and Deploy
     runs-on: ubuntu-latest
     env:
-      VULTR_REGISTRY_USERNAME: ${{ secrets.VULTR_REGISTRY_USERNAME || vars.VULTR_REGISTRY_USERNAME }}
-      VULTR_REGISTRY_PASSWORD: ${{ secrets.VULTR_REGISTRY_PASSWORD || vars.VULTR_REGISTRY_PASSWORD }}
-      VULTR_REGISTRY_URL: ${{ secrets.VULTR_REGISTRY_URL || vars.VULTR_REGISTRY_URL || 'sgp.vultrcr.com' }}
-      REGISTRY_PATH: ${{ vars.REGISTRY_PATH || 'sgp.vultrcr.com/qlink01/jr_backend' }}
       VPS_HOST: ${{ secrets.VPS_HOST || vars.VPS_HOST }}
       VPS_USERNAME: ${{ secrets.VPS_USERNAME || vars.VPS_USERNAME }}
       VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || vars.VPS_PASSWORD }}
       GH_PAT: ${{ secrets.GH_PAT || vars.GH_PAT }}
+      APP_DIR: ${{ vars.APP_DIR || '/opt/jr_bot_backend' }}
+      IMAGE_NAME: ${{ vars.IMAGE_NAME || 'jr_backend:latest' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate deployment secrets
+      - name: Validate deployment values
         run: |
           missing=()
           for name in \
-            VULTR_REGISTRY_USERNAME \
-            VULTR_REGISTRY_PASSWORD \
-            VULTR_REGISTRY_URL \
             VPS_HOST \
             VPS_USERNAME \
             VPS_PASSWORD \
@@ -46,28 +41,28 @@ jobs:
             exit 1
           fi
 
-      - name: Login to Vultr Container Registry
-        run: |
-          printf '%s' "$VULTR_REGISTRY_PASSWORD" | docker login \
-            -u "$VULTR_REGISTRY_USERNAME" \
-            --password-stdin \
-            "$VULTR_REGISTRY_URL"
-
-      - name: Build and push Docker image
-        run: |
-          export DOCKER_BUILDKIT=1
-          docker build -t $REGISTRY_PATH:latest .
-          docker push $REGISTRY_PATH:latest
-
-      - name: Deploy to VPS
+      - name: Build and deploy on VPS
         uses: appleboy/ssh-action@master
         with:
           host: ${{ env.VPS_HOST }}
           username: ${{ env.VPS_USERNAME }}
           password: ${{ env.VPS_PASSWORD }}
           script: |
-            docker login -u "${{ env.VULTR_REGISTRY_USERNAME }}" -p "${{ env.VULTR_REGISTRY_PASSWORD }}" "${{ env.VULTR_REGISTRY_URL }}"
-            docker pull "${{ env.REGISTRY_PATH }}:latest"
+            set -e
+            APP_DIR="${{ env.APP_DIR }}"
+            IMAGE_NAME="${{ env.IMAGE_NAME }}"
+
+            if [ -d "$APP_DIR/.git" ]; then
+              cd "$APP_DIR"
+              git fetch origin main
+              git reset --hard origin/main
+            else
+              rm -rf "$APP_DIR"
+              git clone https://github.com/Qlink149/JR_bot_backend.git "$APP_DIR"
+              cd "$APP_DIR"
+            fi
+
+            docker build -t "$IMAGE_NAME" .
             docker stop qlink || true
             docker rm qlink || true
             docker run -d \
@@ -98,7 +93,7 @@ jobs:
               -e JR_API_CLIENT_ID=${{ secrets.JR_API_CLIENT_ID }} \
               -e JR_API_CLIENT_SECRET=${{ secrets.JR_API_CLIENT_SECRET }} \
               -e CORS_ORIGINS=${{ secrets.CORS_ORIGINS }} \
-              "${{ env.REGISTRY_PATH }}"
+              "$IMAGE_NAME"
 
       - name: Cleanup
         uses: appleboy/ssh-action@master
