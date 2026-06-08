@@ -439,12 +439,25 @@ def _resolve_color_sku_scores(colors: list[str], limit: int = 1000) -> tuple[lis
                 "color_raw": {
                     "$ifNull": [
                         "$PrimaryColorName",
-                        {
-                            "$ifNull": [
-                                "$Primary Color Name",
-                                {"$ifNull": ["$ColorName", {"$ifNull": ["$color", "$Colour"]}]},
-                            ]
-                        },
+                        {"$ifNull": [
+                            "$Primary Color Name",
+                            {"$ifNull": [
+                                "$ColorName",
+                                {"$ifNull": [
+                                    "$Color",
+                                    {"$ifNull": [
+                                        "$color",
+                                        {"$ifNull": [
+                                            "$Colour",
+                                            {"$ifNull": [
+                                                "$primary_color",
+                                                {"$ifNull": ["$colorName", "$colorFamily"]},
+                                            ]},
+                                        ]},
+                                    ]},
+                                ]},
+                            ]},
+                        ]},
                     ]
                 },
                 "percentage": {
@@ -809,12 +822,16 @@ async def jaipur_rugs_product_search(
                 logger.info(f"No SKU matched in product_color for colors={colors}")
 
         # Field fallback sequences per filter type
-        # Color: single color → try single field first, then multi; multiple colors → multi only
+        # Color: try structured fields when query_colors is set.
+        # Never include None here — that would drop the color filter entirely and return
+        # random in-stock products. The None case is handled below as a text fallback.
         if len(query_colors) == 1:
-            color_fields = ["search.color.single", "search.color.multi", None]
+            color_fields = ["search.color.single", "search.color.multi"]
         elif len(query_colors) > 1:
-            color_fields = ["search.color.multi", None]
+            color_fields = ["search.color.multi"]
         else:
+            # query_colors is empty (cleared) because color_sku_filter already handles it,
+            # or there was no color filter at all.
             color_fields = [None]
 
         # Size: exact match → group match
@@ -867,6 +884,23 @@ async def jaipur_rugs_product_search(
             results = _run_query(query)
             if results:
                 logger.info(f"Style text-fallback found {len(results)} products for styles={styles}")
+
+        # Color text-fallback: when structured color fields (search.color.single/multi) found nothing,
+        # search the color name as plain text in product name/collection/design fields.
+        # This prevents the search from silently dropping the color filter and returning random products.
+        if not results and colors and not color_sku_filter:
+            logger.info(f"Structured color fields returned no results — trying name/collection text search for colors={colors}")
+            query = _build_mongo_query(
+                None, [],
+                size_fields[0] if size_fields[0] else None, sizes,
+                material_fields[0] if material_fields[0] else None, materials,
+                constructions, styles,
+                price_filter, generics + colors,
+                color_sku_filter,
+            )
+            results = _run_query(query)
+            if results:
+                logger.info(f"Color text-fallback found {len(results)} products for colors={colors}")
 
         # Fallback: price / weight only (drop keyword filters)
         if not results and (price_filter or weight_filter):

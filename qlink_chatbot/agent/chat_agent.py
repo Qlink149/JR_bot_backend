@@ -59,7 +59,7 @@ tools = [
                 },
                 "currency": {
                     "type": "string",
-                    "description": "Optional display/filter currency explicitly requested by the user. Use one of INR, AED, AUD, CHF, EUR, GBP, SGD, USD. Leave empty when user did not request a currency."
+                    "description": "Display currency for showing product prices. Pass only when the user explicitly requests prices in a specific currency (e.g. 'show prices in USD'). For price filtering such as 'under $500' or 'above INR 30000', include that in the keyword instead (e.g. keyword='under USD 500'). Leave empty when user did not request a specific display currency."
                 }
             },
             "required": ["keyword"]
