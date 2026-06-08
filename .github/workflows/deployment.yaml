@@ -66,6 +66,8 @@ jobs:
             DOCKER_BUILDKIT=1 docker build -t "$IMAGE_NAME" .
             docker stop qlink || true
             docker rm qlink || true
+            docker ps -q --filter "publish=8000" | xargs -r docker stop || true
+            docker ps -aq --filter "publish=8000" | xargs -r docker rm || true
             docker run -d \
               --name qlink \
               -p 8000:8000 \
