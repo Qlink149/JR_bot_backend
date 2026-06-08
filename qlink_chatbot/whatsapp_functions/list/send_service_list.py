@@ -2,7 +2,7 @@ import json
 
 import httpx
 
-from qlink_chatbot.constants import GUPSHUP_SOURCE, QLINK_SOURCE
+from qlink_chatbot.constants import GUPSHUP_SOURCE
 from qlink_chatbot.models.enums import ListIds
 from qlink_chatbot.utils.env_load import (
     gupshup_api_key,

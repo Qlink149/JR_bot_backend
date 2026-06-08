@@ -47,6 +47,15 @@ def get_cors_origins() -> list[str]:
 
     return origins or ["*"]
 
+
+def is_app_cors_enabled() -> bool:
+    return os.getenv("APP_CORS_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 app = FastAPI(
     title="Jaipur Rugs chatbot backend API",
     version="0.1.0",
@@ -55,13 +64,14 @@ app = FastAPI(
     openapi_url=None,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=get_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if is_app_cors_enabled():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
