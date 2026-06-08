@@ -16,6 +16,7 @@ jobs:
       VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || vars.VPS_PASSWORD }}
       APP_DIR: ${{ vars.APP_DIR || '/opt/jr_bot_backend' }}
       IMAGE_NAME: ${{ vars.IMAGE_NAME || 'jr_backend:latest' }}
+      ENV_FILE: ${{ vars.ENV_FILE || '/opt/jr_backend.env' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,6 +50,7 @@ jobs:
             set -e
             APP_DIR="${{ env.APP_DIR }}"
             IMAGE_NAME="${{ env.IMAGE_NAME }}"
+            ENV_FILE="${{ env.ENV_FILE }}"
 
             CLONE_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Qlink149/JR_bot_backend.git"
 
@@ -71,31 +73,9 @@ jobs:
             docker run -d \
               --name qlink \
               -p 8000:8000 \
+              --env-file "$ENV_FILE" \
               -e PYTHONUNBUFFERED=1 \
               -e PYTHONDONTWRITEBYTECODE=1 \
-              -e OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
-              -e MONGO_URI=${{ secrets.MONGO_URI }} \
-              -e GUPSHUP_APP_ID=${{ secrets.GUPSHUP_APP_ID }} \
-              -e GUPSHUP_TOKEN=${{ secrets.GUPSHUP_TOKEN }} \
-              -e GUPSHUP_APP_NAME=${{ secrets.GUPSHUP_APP_NAME }} \
-              -e GUPSHUP_API_KEY=${{ secrets.GUPSHUP_API_KEY }} \
-              -e GUPSHUP_SOURCE=${{ secrets.GUPSHUP_SOURCE }} \
-              -e DEFAULT_COUNTRY_CODE=${{ secrets.DEFAULT_COUNTRY_CODE }} \
-              -e ENV_MODE=${{ secrets.ENV_MODE }} \
-              -e PINECONE_API=${{ secrets.PINECONE_API }} \
-              -e R2_ACCESS_KEY=${{ secrets.R2_ACCESS_KEY }} \
-              -e R2_SECRET_KEY=${{ secrets.R2_SECRET_KEY }} \
-              -e WHAPI_TOKEN=${{ secrets.WHAPI_TOKEN }} \
-              -e WEBHOOK_API=${{ secrets.WEBHOOK_API }} \
-              -e QLINK_GUPSHUP_APP_ID=${{ secrets.QLINK_GUPSHUP_APP_ID }} \
-              -e QLINK_GUPSHUP_PARTNER_APP_TOKEN=${{ secrets.QLINK_GUPSHUP_PARTNER_APP_TOKEN }} \
-              -e QLINK_GUPSHUP_SOURCE=${{ secrets.QLINK_GUPSHUP_SOURCE }} \
-              -e QLINK_GUPSHUP_APP_NAME=${{ secrets.QLINK_GUPSHUP_APP_NAME }} \
-              -e JR_API_USERNAME=${{ secrets.JR_API_USERNAME }} \
-              -e JR_API_PASSWORD=${{ secrets.JR_API_PASSWORD }} \
-              -e JR_API_CLIENT_ID=${{ secrets.JR_API_CLIENT_ID }} \
-              -e JR_API_CLIENT_SECRET=${{ secrets.JR_API_CLIENT_SECRET }} \
-              -e CORS_ORIGINS=${{ secrets.CORS_ORIGINS }} \
               "$IMAGE_NAME"
 
       - name: Cleanup
