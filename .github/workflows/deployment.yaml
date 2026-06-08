@@ -14,12 +14,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login to Vultr Container Registry
+      - name: Validate deployment secrets
+        env:
+          VULTR_REGISTRY_USERNAME: ${{ secrets.VULTR_REGISTRY_USERNAME }}
+          VULTR_REGISTRY_PASSWORD: ${{ secrets.VULTR_REGISTRY_PASSWORD }}
+          VULTR_REGISTRY_URL: ${{ secrets.VULTR_REGISTRY_URL }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USERNAME: ${{ secrets.VPS_USERNAME }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          echo "${{ secrets.VULTR_REGISTRY_PASSWORD }}" | docker login \
-            -u "${{ secrets.VULTR_REGISTRY_USERNAME }}" \
+          missing=()
+          for name in \
+            VULTR_REGISTRY_USERNAME \
+            VULTR_REGISTRY_PASSWORD \
+            VULTR_REGISTRY_URL \
+            VPS_HOST \
+            VPS_USERNAME \
+            VPS_PASSWORD \
+            GH_PAT
+          do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required GitHub secrets:\n'
+            printf ' - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Login to Vultr Container Registry
+        env:
+          VULTR_REGISTRY_USERNAME: ${{ secrets.VULTR_REGISTRY_USERNAME }}
+          VULTR_REGISTRY_PASSWORD: ${{ secrets.VULTR_REGISTRY_PASSWORD }}
+          VULTR_REGISTRY_URL: ${{ secrets.VULTR_REGISTRY_URL }}
+        run: |
+          printf '%s' "$VULTR_REGISTRY_PASSWORD" | docker login \
+            -u "$VULTR_REGISTRY_USERNAME" \
             --password-stdin \
-            "${{ secrets.VULTR_REGISTRY_URL }}"
+            "$VULTR_REGISTRY_URL"
 
       - name: Build and push Docker image
         run: |
