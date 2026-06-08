@@ -14,7 +14,6 @@ jobs:
       VPS_HOST: ${{ secrets.VPS_HOST || vars.VPS_HOST }}
       VPS_USERNAME: ${{ secrets.VPS_USERNAME || vars.VPS_USERNAME }}
       VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || vars.VPS_PASSWORD }}
-      GH_PAT: ${{ secrets.GH_PAT || vars.GH_PAT }}
       APP_DIR: ${{ vars.APP_DIR || '/opt/jr_bot_backend' }}
       IMAGE_NAME: ${{ vars.IMAGE_NAME || 'jr_backend:latest' }}
     steps:
@@ -27,8 +26,7 @@ jobs:
           for name in \
             VPS_HOST \
             VPS_USERNAME \
-            VPS_PASSWORD \
-            GH_PAT
+            VPS_PASSWORD
           do
             if [ -z "${!name}" ]; then
               missing+=("$name")
@@ -102,8 +100,3 @@ jobs:
           username: ${{ env.VPS_USERNAME }}
           password: ${{ env.VPS_PASSWORD }}
           script: docker image prune -f
-
-      - name: Mirror to WhatsApp backend repo (triggers Vercel)
-        run: |
-          git remote add whatsapp https://x-access-token:${{ env.GH_PAT }}@github.com/Qlink149/jaipurrugs-whatsapp-backend.git
-          git push whatsapp HEAD:main --force
