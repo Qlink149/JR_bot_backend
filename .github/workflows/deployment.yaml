@@ -63,7 +63,7 @@ jobs:
               cd "$APP_DIR"
             fi
 
-            docker build -t "$IMAGE_NAME" .
+            DOCKER_BUILDKIT=1 docker build -t "$IMAGE_NAME" .
             docker stop qlink || true
             docker rm qlink || true
             docker run -d \
