@@ -50,13 +50,16 @@ jobs:
             APP_DIR="${{ env.APP_DIR }}"
             IMAGE_NAME="${{ env.IMAGE_NAME }}"
 
+            CLONE_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Qlink149/JR_bot_backend.git"
+
             if [ -d "$APP_DIR/.git" ]; then
               cd "$APP_DIR"
+              git remote set-url origin "$CLONE_URL"
               git fetch origin main
               git reset --hard origin/main
             else
               rm -rf "$APP_DIR"
-              git clone https://github.com/Qlink149/JR_bot_backend.git "$APP_DIR"
+              git clone "$CLONE_URL" "$APP_DIR"
               cd "$APP_DIR"
             fi
 
