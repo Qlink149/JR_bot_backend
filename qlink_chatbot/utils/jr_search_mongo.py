@@ -15,9 +15,23 @@ from qlink_chatbot.utils.jr_search_aliases import (
     WEIGHT_PATTERN,
 )
 from qlink_chatbot.utils.jr_search_currency import apply_price_filter
+from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
 from qlink_chatbot.utils.logger_config import logger
 
 products_collection = db["products"]
+
+MONGO_QUERY_MAX_MS = 25_000
+CANDIDATE_LIMIT = 800
+
+COMPACT_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "color": ("search.color.single", "search.color.multi"),
+    "material": ("search.material.primary", "search.material.family", "search.material.details"),
+    "construction": ("search.construction",),
+    "shape": ("search.shape",),
+    "size": ("search.size.exact",),
+    "pattern": ("search.style",),
+    "room": ("search.room",),
+}
 
 
 def size_regex(size_text: str) -> str:
@@ -65,19 +79,65 @@ def classify_segment(segment: str) -> str:
     return "general"
 
 
+def _segment_search_tokens(segment: str, segment_type: str) -> list[str]:
+    parts = [p.strip().lower() for p in segment.split("||") if p.strip()]
+    tokens: list[str] = []
+
+    for part in parts:
+        if segment_type == "size":
+            match = SIZE_PATTERN.search(part)
+            if match:
+                tokens.append(f"{match.group(1)}x{match.group(2)}")
+            else:
+                tokens.append(part)
+        elif segment_type == "shape":
+            tokens.append(SHAPE_ALIASES.get(part, part).lower())
+        elif segment_type == "construction":
+            for kw in sorted(CONSTRUCTION_KEYWORDS, key=len, reverse=True):
+                if kw in part:
+                    tokens.extend(kw.split())
+                    break
+            else:
+                tokens.extend(part.split())
+        elif segment_type == "weight":
+            match = WEIGHT_PATTERN.search(part)
+            if match:
+                tokens.append(f"{match.group(1)}kg".replace(".0", ""))
+        else:
+            tokens.append(part)
+
+    return [t for t in tokens if t]
+
+
 def segment_to_mongo_clause(segment: str) -> dict:
+    """Indexed token query with compact field fallback for older synced docs."""
     parts = [p.strip() for p in segment.split("||") if p.strip()]
     if not parts:
         return {}
 
     segment_type = classify_segment(segment)
-    fields = MONGO_FIELDS_BY_TYPE[segment_type]
-    or_clauses = []
-    for part in parts:
-        pattern = size_regex(part) if segment_type == "size" else re.escape(part)
-        for field in fields:
-            or_clauses.append({field: {"$regex": pattern, "$options": "i"}})
-    return {"$or": or_clauses} if or_clauses else {}
+    tokens = _segment_search_tokens(segment, segment_type)
+    if not tokens:
+        return {}
+
+    clauses: list[dict] = []
+
+    if segment_type == "construction" and len(tokens) > 1:
+        clauses.append({"search_tokens": {"$all": tokens}})
+    elif len(tokens) == 1:
+        clauses.append({"search_tokens": tokens[0]})
+    else:
+        clauses.extend({"search_tokens": token} for token in tokens)
+
+    compact_fields = COMPACT_FIELDS_BY_TYPE.get(segment_type, ())
+    regex_clauses = []
+    for field in compact_fields:
+        for token in tokens:
+            regex_clauses.append({field: {"$regex": re.escape(token), "$options": "i"}})
+    if regex_clauses:
+        clauses.append({"$or": regex_clauses})
+
+    return {"$or": clauses} if len(clauses) > 1 else clauses[0]
 
 
 def color_field_matches(term: str, field_value: str) -> bool:
@@ -166,14 +226,21 @@ def filter_products_by_clean_keyword(products: list[dict], clean_keyword: str) -
     return [p for p in products if all(product_matches_segment(p, seg) for seg in segments)]
 
 
-def get_instock_products() -> list[dict]:
-    cursor = products_collection.find({"flags.inStock": True}, {"_id": 0, "raw": 1})
+def get_instock_products(limit: int = CANDIDATE_LIMIT) -> list[dict]:
+    ensure_product_search_indexes()
+    cursor = products_collection.find(
+        {"flags.inStock": True},
+        {"_id": 0, "raw": 1},
+        max_time_ms=MONGO_QUERY_MAX_MS,
+    ).limit(limit)
     return [doc["raw"] for doc in cursor if doc.get("raw")]
 
 
-def mongo_search_products(clean_keyword: str, candidate_limit: int = 5000) -> list[dict]:
+def mongo_search_products(clean_keyword: str, candidate_limit: int = CANDIDATE_LIMIT) -> list[dict]:
     if not clean_keyword:
         return []
+
+    ensure_product_search_indexes()
 
     segments = [s.strip() for s in clean_keyword.split("&") if s.strip()]
     logger.info(
@@ -186,21 +253,14 @@ def mongo_search_products(clean_keyword: str, candidate_limit: int = 5000) -> li
     if and_clauses:
         query["$and"] = and_clauses
 
-    cursor = (
-        products_collection.find(query, {"_id": 0, "raw": 1})
-        .sort("raw.ModifyDate", -1)
-        .limit(candidate_limit)
-    )
+    cursor = products_collection.find(
+        query,
+        {"_id": 0, "raw": 1},
+        max_time_ms=MONGO_QUERY_MAX_MS,
+    ).limit(candidate_limit)
     candidates = [doc["raw"] for doc in cursor if doc.get("raw")]
     results = filter_products_by_clean_keyword(candidates, clean_keyword)
-
-    if not results and and_clauses:
-        logger.info("[MONGO] strict query returned 0 — retrying with in-stock scan")
-        all_instock = get_instock_products()
-        results = filter_products_by_clean_keyword(all_instock, clean_keyword)
-        logger.info(f"[MONGO] full scan {len(all_instock)} in-stock → {len(results)} matched")
-    else:
-        logger.info(f"[MONGO] {len(candidates)} candidates → {len(results)} matched")
+    logger.info(f"[MONGO] {len(candidates)} candidates → {len(results)} matched")
     return results
 
 

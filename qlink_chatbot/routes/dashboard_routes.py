@@ -675,16 +675,19 @@ def save_catalog_recommendation(design_id: str, payload: dict = Body(...)):
 
 
 def _website_product_sync_doc(product: dict) -> dict | None:
+    from qlink_chatbot.utils.jr_search_index import build_search_tokens
+
     barcode = product.get("BarCode")
     if not barcode:
         return None
-    return {
+    doc = {
         "raw": product,
         "BarCode": barcode,
         "SKU": product.get("SKU"),
         "flags": {
             "inStock": bool(product.get("LiveStatus")) and bool(product.get("Published")),
         },
+        "search_tokens": build_search_tokens(product),
         "search": {
             "color": {"single": product.get("GrColor", ""), "multi": product.get("ColorFamily", "")},
             "material": {
@@ -703,9 +706,13 @@ def _website_product_sync_doc(product: dict) -> dict | None:
         },
         "updated_at": datetime.utcnow(),
     }
+    return doc
 
 
 def _bulk_sync_website_products(products: list[dict]) -> dict:
+    from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
+
+    ensure_product_search_indexes()
     synced = 0
     skipped = 0
     operations = []
@@ -734,6 +741,14 @@ def _bulk_sync_website_products(products: list[dict]) -> dict:
 
     flush_operations()
     return {"synced": synced, "skipped": skipped}
+
+
+@dashboard_router.post("/backfill-search-tokens")
+def backfill_product_search_tokens(batch_size: int = 1000):
+    """One-time helper to index search_tokens on existing MongoDB product docs."""
+    from qlink_chatbot.utils.jr_search_index import backfill_search_tokens
+
+    return backfill_search_tokens(batch_size=batch_size)
 
 
 @dashboard_router.post("/sync-products")

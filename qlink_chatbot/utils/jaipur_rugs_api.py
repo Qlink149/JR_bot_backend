@@ -2,7 +2,6 @@ import asyncio
 import random
 
 from qlink_chatbot.database.mongo_utils import db
-from qlink_chatbot.utils.jr_api_client import search_products as _jr_search_products
 from qlink_chatbot.utils.jr_search_currency import (
     CALLING_CODE_TO_CURRENCY,
     CURRENCY_FIELDS,
@@ -45,30 +44,6 @@ def _first_valid_image(p: dict) -> str:
     return ""
 
 
-async def _mongo_search_safe(clean_keyword: str) -> list[dict]:
-    try:
-        return await asyncio.to_thread(mongo_search_products, clean_keyword)
-    except Exception as err:
-        logger.warning(f"[SEARCH] MongoDB search failed — will try API fallback: {err}")
-        return []
-
-
-async def _mongo_instock_safe() -> list[dict]:
-    try:
-        return await asyncio.to_thread(get_instock_products)
-    except Exception as err:
-        logger.warning(f"[SEARCH] MongoDB in-stock fetch failed — will try API fallback: {err}")
-        return []
-
-
-async def _api_search_safe(clean_keyword: str) -> list[dict]:
-    try:
-        return await _jr_search_products(clean_keyword)
-    except Exception as err:
-        logger.warning(f"[SEARCH] JR API search failed: {err}")
-        return []
-
-
 async def jaipur_rugs_product_search(
     keyword: str,
     client_ip: str = "",
@@ -76,7 +51,7 @@ async def jaipur_rugs_product_search(
     requested_currency: str = "",
     exclude_skus: set | None = None,
 ):
-    """Search products — MongoDB primary (synced Product Master), API fallback."""
+    """Search products from MongoDB (synced Product Master)."""
     try:
         keyword = (keyword or "").strip()
         requested_currency = (
@@ -101,29 +76,13 @@ async def jaipur_rugs_product_search(
             logger.warning("[SEARCH] no searchable terms after normalisation")
             return {"error": "No products found."}
 
-        raw_results: list[dict] = []
-        search_source = ""
-
         if not clean_keyword:
-            logger.info("[SEARCH] price-only query — full in-stock catalogue from MongoDB")
-            raw_results = await _mongo_instock_safe()
+            logger.info("[SEARCH] price-only query — in-stock catalogue from MongoDB")
+            raw_results = await asyncio.to_thread(get_instock_products)
             search_source = "mongo-catalogue"
-            if not raw_results:
-                from qlink_chatbot.utils.jr_api_client import get_all_products as _jr_all
-                try:
-                    raw_results = await _jr_all()
-                    search_source = "api-catalogue-fallback"
-                except Exception as api_err:
-                    logger.warning(f"[SEARCH] API catalogue fallback failed: {api_err}")
         else:
-            raw_results = await _mongo_search_safe(clean_keyword)
+            raw_results = await asyncio.to_thread(mongo_search_products, clean_keyword)
             search_source = "mongo-search"
-
-            if not raw_results:
-                logger.info("[SEARCH] MongoDB empty/unavailable — falling back to JR product-master-search API")
-                raw_results = await _api_search_safe(clean_keyword)
-                if raw_results:
-                    search_source = "api-search-fallback"
 
         logger.info(f"[SEARCH] raw results from {search_source}: {len(raw_results)}")
 
@@ -147,27 +106,6 @@ async def jaipur_rugs_product_search(
             price_filter=price_filter,
             exclude_skus=exclude_skus,
         )
-
-        # Mongo/API raw hits can be broad — if strict filters remove everything, retry API once.
-        if (
-            not unique_results
-            and clean_keyword
-            and search_source == "mongo-search"
-        ):
-            logger.info("[SEARCH] 0 after filters on Mongo results — retrying JR API")
-            api_results = await _api_search_safe(clean_keyword)
-            if api_results:
-                unique_results = await asyncio.to_thread(
-                    apply_search_pipeline,
-                    api_results,
-                    color_check_terms=color_check_terms,
-                    attribute_filters=attribute_filters,
-                    price_filter=price_filter,
-                    exclude_skus=exclude_skus,
-                )
-                if unique_results:
-                    search_source = "api-search-fallback"
-
         if not unique_results:
             logger.warning("[SEARCH] 0 products after filters")
             return {"error": "No products found."}
