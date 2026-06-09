@@ -17,7 +17,7 @@ from qlink_chatbot.database.pinecone_utils import fetch_similar_sessions
 from qlink_chatbot.utils.agent_availability import get_agent_status
 from qlink_chatbot.utils.jaipur_rugs_api import jaipur_rugs_product_search
 from qlink_chatbot.utils.logger_config import logger
-from qlink_chatbot.utils.store_locations import search_store_locations
+from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
@@ -172,6 +172,102 @@ def agent_alert_tool(alert, sesson_id):
         logger.error("Error occured while using agent alert tool call.")
 
 
+_STORE_KEYWORDS = {
+    "store", "stores", "showroom", "showrooms", "retail", "retailer",
+    "retailers", "standalone", "offline", "physical", "nearest store",
+    "physical store", "visit", "in person", "see rugs", "where can i",
+    "shop location", "outlet", "outlets", "gallery", "galleries",
+    "address", "directions", "timing", "timings",
+}
+
+_STORE_FOLLOWUP_PHRASES = {
+    "show more", "more", "next", "more stores", "show other stores",
+    "other stores", "list more", "details", "store details",
+}
+
+
+def _is_store_query(user_message: str, chat_history) -> bool:
+    msg_lower = (user_message or "").lower().strip()
+    if any(kw in msg_lower for kw in _STORE_KEYWORDS):
+        return True
+
+    if msg_lower in _STORE_FOLLOWUP_PHRASES:
+        recent_context = format_recent_chat_for_ai(chat_history, limit=4).lower()
+        return any(kw in recent_context for kw in ("store", "showroom", "retail", "address", "timing"))
+
+    return False
+
+
+def _is_store_more_followup(user_message: str) -> bool:
+    return (user_message or "").lower().strip() in _STORE_FOLLOWUP_PHRASES
+
+
+def _store_query_from_message(user_message: str) -> str:
+    msg_lower = (user_message or "").lower()
+    for store in JAIPUR_RUGS_STORE_LOCATIONS:
+        city = (store.get("city") or "").lower()
+        country = (store.get("country") or "").lower()
+        if city and city in msg_lower:
+            return city
+        if country and country in msg_lower:
+            return country
+
+    aliases = {
+        "bangalore": "bengaluru",
+        "new delhi": "delhi",
+        "delhi ncr": "delhi",
+        "lower parel": "mumbai",
+        "andheri": "mumbai",
+        "uae": "dubai",
+        "united arab emirates": "dubai",
+        "saudi": "ksa",
+        "saudi arabia": "ksa",
+        "usa": "acworth",
+        "america": "acworth",
+        "coimbatore": "other cities",
+        "kerala": "other cities",
+        "hyderabad": "other cities",
+        "milano": "milan",
+    }
+    for alias, city in aliases.items():
+        if alias in msg_lower:
+            return city
+
+    return "all stores"
+
+
+def _format_store_response(store_result: dict, limit: int = 3, offset: int = 0) -> str:
+    stores = store_result.get("stores", []) if isinstance(store_result, dict) else []
+    source = store_result.get("source", "") if isinstance(store_result, dict) else ""
+
+    if not stores:
+        return (
+            "I don't have verified store address or timing details for that location right now. "
+            "Shall I connect you with a sales agent for the correct information?"
+        )
+
+    selected_stores = stores[offset:offset + limit] or stores[:limit]
+    intro = "Here are more Jaipur Rugs retail stores/showrooms:" if offset else "Yes, Jaipur Rugs has verified retail stores/showrooms. Here are a few:"
+    lines = [intro]
+    for store in selected_stores:
+        lines.extend([
+            "",
+            f"**{store.get('name', 'Jaipur Rugs Store')}**",
+            f"- Address: {store.get('address') or 'Not available in verified store data'}",
+            f"- Phone: {store.get('phone') or 'Not available in verified store data'}",
+            f"- Timing: {store.get('timing') or 'Not available in verified store data'}",
+        ])
+
+    if len(stores) > offset + limit:
+        lines.append("")
+        lines.append("I can show more stores if you want.")
+    if source:
+        lines.append("")
+        lines.append(f"Source: {source}")
+
+    return "\n".join(lines)
+
+
 async def chat_agent(
     chat_history,
     user_message,
@@ -186,8 +282,25 @@ async def chat_agent(
     response = None
     try:
         logger.info(f"[AGENT-IN] session={session_id} collection={collection_name} currency={detected_currency} msg={user_message!r}")
+
+        if _is_store_query(user_message, chat_history):
+            store_query = _store_query_from_message(user_message)
+            store_result = search_store_locations(query=store_query)
+            store_count = len(store_result.get("stores", []))
+            logger.info(f"[AGENT-GUARD] store query={store_query!r} -> {store_count} store(s)")
+            if debug_collector is not None:
+                debug_collector.append({
+                    "tool": "search_store_locations",
+                    "query": store_query,
+                    "stores_found": store_count,
+                })
+            offset = 3 if _is_store_more_followup(user_message) else 0
+            limit = 6 if offset else 3
+            return _format_store_response(store_result, limit=limit, offset=offset)
+
         if not client:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
+
         system_prompt_variable = return_system_prompt()
         if system_prompt_variable:
             system_prompt = build_system_prompt(
@@ -230,11 +343,6 @@ async def chat_agent(
 
         # Python-level store guard: pre-fetch store data and inject into context so the
         # LLM always has verified store data regardless of whether it calls the tool.
-        _STORE_KEYWORDS = {
-            "store", "stores", "showroom", "showrooms", "retail", "nearest store",
-            "physical store", "visit", "in person", "see rugs", "where can i",
-            "shop location", "outlet", "gallery", "exhibition",
-        }
         _msg_lower = user_message.lower()
         if any(kw in _msg_lower for kw in _STORE_KEYWORDS):
             logger.info(f"[AGENT] Store keyword detected — pre-fetching store data")
