@@ -72,7 +72,8 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
         session = {"chat_history": [], "country_code": resolved_country, "geo": geo}
     else:
         geo = session.get("geo") or {}
-        resolved_country = session.get("country_code") or country_code
+        # Trust the incoming country_code from URL — user may have switched the dropdown
+        resolved_country = country_code or session.get("country_code", "")
         if resolved_country and resolved_country != session.get("country_code"):
             update_session_country(session_id=session_id, country_code=resolved_country)
 
@@ -115,7 +116,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     await a.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 await websocket.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 
-                detected_currency = geo.get("currency") or currency_for_country(resolved_country)
+                detected_currency = currency_for_country(resolved_country) or geo.get("currency", "INR")
                 logger.info(f"[WEB-IN] session={session_id} country={resolved_country} currency={detected_currency} msg={message['content']!r}")
                 debug_tool_calls = []
                 response = await chat_agent(
