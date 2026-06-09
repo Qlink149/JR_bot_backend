@@ -850,8 +850,20 @@ async def jaipur_rugs_product_search(
         color_sku_scores: dict = {}
         query_colors = colors[:]
 
-        # If user asked for colors, first resolve matching SKUs from product_color.
-        if colors:
+        # Special case: "multicolor" / "multi" means products with multiple colors.
+        # These are stored in MongoDB as comma-separated values in search.color.multi
+        # (e.g., "Red, Blue, Green") — not as the literal word "multicolor".
+        _MULTICOLOR_TERMS = {"multicolor", "multi", "multi color", "multi-color", "multicolour"}
+        is_multicolor_query = bool(colors) and all(c.lower() in _MULTICOLOR_TERMS for c in colors)
+
+        if is_multicolor_query:
+            logger.info(f"[COLOR] Multicolor query detected — searching search.color.multi with comma filter")
+            query_colors = []
+            color_sku_filter = []
+            color_sku_scores = {}
+            colors = []
+        elif colors:
+            # If user asked for colors, first resolve matching SKUs from product_color.
             logger.info(f"Attempting product_color lookup for colors={colors}")
             color_sku_filter, color_sku_scores = _resolve_color_sku_scores(colors)
             if color_sku_filter:
@@ -865,7 +877,9 @@ async def jaipur_rugs_product_search(
         # Color: try structured fields when query_colors is set.
         # Never include None here — that would drop the color filter entirely and return
         # random in-stock products. The None case is handled below as a text fallback.
-        if len(query_colors) == 1:
+        if is_multicolor_query:
+            color_fields = [None]  # handled separately below
+        elif len(query_colors) == 1:
             color_fields = ["search.color.single", "search.color.multi"]
         elif len(query_colors) > 1:
             color_fields = ["search.color.multi"]
@@ -908,6 +922,29 @@ async def jaipur_rugs_product_search(
                             f"[color={c_field}, size={s_field}, material={m_field}]"
                         )
                         break
+
+        # Multicolor: find products where search.color.multi contains a comma (2+ colors listed)
+        if not results and is_multicolor_query:
+            base_query = {"flags.inStock": True, "search.color.multi": {"$regex": ",.+", "$options": "i"}}
+            if sizes:
+                size_regex = "|".join(re.escape(s) for s in sizes)
+                base_query["search.size.exact"] = {"$regex": size_regex, "$options": "i"}
+            if materials:
+                mat_regex = "|".join(re.escape(m) for m in materials)
+                base_query["search.material.primary"] = {"$regex": mat_regex, "$options": "i"}
+            results = _run_query(base_query)
+            if results:
+                logger.info(f"[COLOR] Multicolor query found {len(results)} products")
+            else:
+                logger.info(f"[COLOR] Multicolor query found no products — trying 'multi' text fallback")
+                base_query.pop("search.color.multi", None)
+                base_query["$or"] = [
+                    {"raw.PrimaryColorName": {"$regex": "multi", "$options": "i"}},
+                    {"search.color.multi": {"$regex": "multi", "$options": "i"}},
+                ]
+                results = _run_query(base_query)
+                if results:
+                    logger.info(f"[COLOR] Multicolor text fallback found {len(results)} products")
 
         # Style fallback: search style keywords in product name/collection/design text
         # (JR API may not populate the Style field consistently)
