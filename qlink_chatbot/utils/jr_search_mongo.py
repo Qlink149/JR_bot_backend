@@ -9,13 +9,20 @@ from qlink_chatbot.utils.jr_search_aliases import (
     KNOWN_SHAPE_VALUES,
     MATERIAL_KEYWORDS,
     MONGO_FIELDS_BY_TYPE,
+    MULTICOLOR_KEYS,
     ROOM_KEYWORDS,
     SHAPE_ALIASES,
     SIZE_PATTERN,
+    ROUND_SIZE_PATTERN,
     WEIGHT_PATTERN,
 )
 from qlink_chatbot.utils.jr_search_currency import apply_price_filter
 from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
+from qlink_chatbot.utils.jr_search_sizes import (
+    cm_to_ft_keyword_variants,
+    parse_requested_cm_size,
+    product_matches_cm_size,
+)
 from qlink_chatbot.utils.logger_config import logger
 
 products_collection = db["products"]
@@ -35,6 +42,10 @@ COMPACT_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
 
 
 def size_regex(size_text: str) -> str:
+    round_m = ROUND_SIZE_PATTERN.search(size_text.strip())
+    if round_m:
+        diameter = round_m.group(1)
+        return rf"(?<!\d){diameter}\s*['′]?\s*round\b"
     m = SIZE_PATTERN.search(size_text.strip())
     if not m:
         return re.escape(size_text.strip())
@@ -52,6 +63,12 @@ def classify_segment(segment: str) -> str:
 
     if len(parts) == 1 and SIZE_PATTERN.search(parts[0]):
         return "size"
+    if len(parts) == 1 and ROUND_SIZE_PATTERN.search(parts[0]):
+        return "size"
+    if len(parts) == 1 and parts[0].lower() in MULTICOLOR_KEYS:
+        return "multicolor"
+    if any(p.lower() in MULTICOLOR_KEYS for p in parts):
+        return "multicolor"
     if all(p in KNOWN_SHAPE_VALUES for p in lowered):
         return "shape"
     if len(parts) == 1 and parts[0].lower() in KNOWN_SHAPE_VALUES:
@@ -85,11 +102,16 @@ def _segment_search_tokens(segment: str, segment_type: str) -> list[str]:
 
     for part in parts:
         if segment_type == "size":
-            match = SIZE_PATTERN.search(part)
-            if match:
-                tokens.append(f"{match.group(1)}x{match.group(2)}")
+            round_match = ROUND_SIZE_PATTERN.search(part)
+            if round_match:
+                tokens.append(round_match.group(1))
+                tokens.append("round")
             else:
-                tokens.append(part)
+                match = SIZE_PATTERN.search(part)
+                if match:
+                    tokens.append(f"{match.group(1)}x{match.group(2)}")
+                else:
+                    tokens.append(part)
         elif segment_type == "shape":
             tokens.append(SHAPE_ALIASES.get(part, part).lower())
         elif segment_type == "construction":
@@ -103,6 +125,8 @@ def _segment_search_tokens(segment: str, segment_type: str) -> list[str]:
             match = WEIGHT_PATTERN.search(part)
             if match:
                 tokens.append(f"{match.group(1)}kg".replace(".0", ""))
+        elif segment_type == "multicolor":
+            tokens.extend(("multi", "multicolor", "multicolour"))
         else:
             tokens.append(part)
 
@@ -124,6 +148,10 @@ def segment_to_mongo_clause(segment: str) -> dict:
 
     if segment_type == "construction" and len(tokens) > 1:
         clauses.append({"search_tokens": {"$all": tokens}})
+    elif segment_type == "size" and len(tokens) > 1:
+        clauses.append({"search_tokens": {"$all": tokens}})
+    elif segment_type == "multicolor":
+        clauses.append({"search_tokens": {"$in": list(dict.fromkeys(tokens))}})
     elif len(tokens) == 1:
         clauses.append({"search_tokens": tokens[0]})
     else:
@@ -156,6 +184,17 @@ def product_matches_color_terms(product: dict, terms: set[str]) -> bool:
     return False
 
 
+def product_matches_multicolor(product: dict) -> bool:
+    color_family = str(product.get("ColorFamily") or "").lower().strip()
+    if color_family == "multi":
+        return True
+    for field in ("DisplayFilter", "Pattern", "ColorFamily", "GrColor", "MultiFilter"):
+        value = str(product.get(field) or "").lower()
+        if re.search(r"\b(multi|multicolor|multicolour)\b", value):
+            return True
+    return False
+
+
 def shape_field_matches(term: str, shape_value: str) -> bool:
     shape = (shape_value or "").lower().strip()
     if not shape or not term:
@@ -165,7 +204,6 @@ def shape_field_matches(term: str, shape_value: str) -> bool:
 
 
 def part_matches_product(product: dict, part: str, segment_type: str) -> bool:
-    fields = [f.replace("raw.", "") for f in MONGO_FIELDS_BY_TYPE[segment_type]]
     part_lower = part.strip().lower()
     if not part_lower:
         return False
@@ -187,6 +225,9 @@ def part_matches_product(product: dict, part: str, segment_type: str) -> bool:
             return False
         return 0 < weight <= max_kg
 
+    if segment_type == "multicolor":
+        return product_matches_multicolor(product)
+
     if segment_type == "room":
         return any(
             part_lower in str(product.get(field) or "").lower()
@@ -199,12 +240,19 @@ def part_matches_product(product: dict, part: str, segment_type: str) -> bool:
             for field in API_SEARCH_FIELDS
         )
 
-    for field in fields:
-        val = str(product.get(field) or "")
-        if segment_type == "size":
+    fields = [f.replace("raw.", "") for f in MONGO_FIELDS_BY_TYPE.get(segment_type, ())]
+    if segment_type == "size":
+        if parse_requested_cm_size(part):
+            return product_matches_cm_size(product, part)
+        for field in fields:
+            val = str(product.get(field) or "")
             if re.search(size_regex(part), val, re.IGNORECASE):
                 return True
-        elif part_lower in val.lower():
+        return False
+
+    for field in fields:
+        val = str(product.get(field) or "")
+        if part_lower in val.lower():
             return True
     return False
 
@@ -232,6 +280,47 @@ def get_instock_products(limit: int = CANDIDATE_LIMIT) -> list[dict]:
         max_time_ms=MONGO_QUERY_MAX_MS,
     ).limit(limit)
     return [doc["raw"] for doc in cursor if doc.get("raw")]
+
+
+def mongo_search_cm_products(size_cm_terms: set[str], candidate_limit: int = CANDIDATE_LIMIT) -> list[dict]:
+    if not size_cm_terms:
+        return []
+
+    ensure_product_search_indexes()
+    term = next(iter(size_cm_terms))
+    target = parse_requested_cm_size(term)
+    if not target:
+        return []
+
+    target_w, target_h = target
+    for ft_keyword in cm_to_ft_keyword_variants(target_w, target_h):
+        candidates = mongo_search_products(ft_keyword, candidate_limit=candidate_limit)
+        matched = [p for p in candidates if product_matches_cm_size(p, term)]
+        if matched:
+            logger.info(
+                f"[MONGO] cm size via ft keyword={ft_keyword!r} "
+                f"→ {len(matched)} matched for {term!r}"
+            )
+            return matched[:candidate_limit]
+
+    cursor = products_collection.find(
+        {
+            "flags.inStock": True,
+            "raw.SizeInCM": {"$regex": r"\d", "$options": "i"},
+        },
+        {"_id": 0, "raw": 1},
+        max_time_ms=MONGO_QUERY_MAX_MS,
+    ).limit(2000)
+    matched = [
+        doc["raw"]
+        for doc in cursor
+        if doc.get("raw")
+        and any(product_matches_cm_size(doc["raw"], size_term) for size_term in size_cm_terms)
+    ]
+    logger.info(
+        f"[MONGO] cm size scan terms={size_cm_terms} → {len(matched)} matched"
+    )
+    return matched[:candidate_limit]
 
 
 def mongo_search_products(clean_keyword: str, candidate_limit: int = CANDIDATE_LIMIT) -> list[dict]:
@@ -313,6 +402,21 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
         else:
             return []
 
+    size_cm_terms = attribute_filters.get("size_cm") or set()
+    if size_cm_terms:
+        filtered = [
+            p for p in result
+            if any(product_matches_cm_size(p, term) for term in size_cm_terms)
+        ]
+        if filtered:
+            logger.info(
+                f"[SEARCH] cm size filter: {len(result)} → {len(filtered)} "
+                f"(terms={size_cm_terms})"
+            )
+            result = filtered
+        else:
+            return []
+
     for attr, fields in (
         ("size", ("SizeInFT", "SizeInCM")),
         ("material", ("Material", "MaterialDetails", "MaterialFamilies")),
@@ -356,7 +460,18 @@ def apply_search_pipeline(
     unique_results = dedupe_by_sku(raw_results)
     logger.info(f"[SEARCH] after dedup: {len(unique_results)} unique products")
 
-    if color_check_terms:
+    multicolor_terms = attribute_filters.get("multicolor") or set()
+    if multicolor_terms:
+        multicolor_filtered = [p for p in unique_results if product_matches_multicolor(p)]
+        if multicolor_filtered:
+            logger.info(
+                f"[SEARCH] multicolor filter: {len(unique_results)} → {len(multicolor_filtered)} "
+                f"(terms={multicolor_terms})"
+            )
+            unique_results = multicolor_filtered
+        else:
+            return []
+    elif color_check_terms:
         color_filtered = [
             p for p in unique_results
             if product_matches_color_terms(p, color_check_terms)

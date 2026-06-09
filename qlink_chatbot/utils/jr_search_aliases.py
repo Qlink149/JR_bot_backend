@@ -1,7 +1,9 @@
 import re
 
 SIZE_PATTERN = re.compile(r"\b(\d+)\s*(?:x|by|\*|X)\s*(\d+)\b", re.IGNORECASE)
+ROUND_SIZE_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*['′]?\s*round\b", re.IGNORECASE)
 WEIGHT_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*kg\b", re.IGNORECASE)
+MULTICOLOR_KEYS = frozenset({"multicolor", "multi", "multicolour", "colorful", "multi color"})
 NOISE_WORDS = {
     "show", "me", "find", "search", "looking", "look", "need", "want",
     "please", "rug", "rugs", "carpet", "carpets", "in", "the", "a", "an",
@@ -56,11 +58,6 @@ COLOR_ALIASES: dict[str, str] = {
     "lavender": "Lavender||Purple||Lilac||Wisteria",
     "violet": "Violet||Purple||Lavender",
     "wisteria": "Wisteria||Lavender||Purple",
-    "multicolor": "Multi",
-    "multi": "Multi",
-    "multi color": "Multi",
-    "multicolour": "Multi",
-    "colorful": "Multi",
 }
 
 SHAPE_ALIASES: dict[str, str] = {

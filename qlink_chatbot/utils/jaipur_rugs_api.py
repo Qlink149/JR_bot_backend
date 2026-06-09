@@ -19,6 +19,7 @@ from qlink_chatbot.utils.jr_search_keywords import (
 from qlink_chatbot.utils.jr_search_mongo import (
     apply_search_pipeline,
     get_instock_products,
+    mongo_search_cm_products,
     mongo_search_products,
     products_collection,
 )
@@ -42,6 +43,14 @@ def _first_valid_image(p: dict) -> str:
         if v and not v.endswith("/"):
             return v
     return ""
+
+
+def _is_displayable_product(p: dict) -> bool:
+    slug = (p.get("ProductURL") or "").strip()
+    sku = (p.get("SKU") or p.get("BarCode") or "").strip()
+    if not slug or not sku:
+        return False
+    return bool(_first_valid_image(p))
 
 
 async def jaipur_rugs_product_search(
@@ -72,7 +81,7 @@ async def jaipur_rugs_product_search(
             f"attribute_filters={attribute_filters}"
         )
 
-        if not clean_keyword and not price_filter:
+        if not clean_keyword and not price_filter and not any(attribute_filters.values()):
             logger.warning("[SEARCH] no searchable terms after normalisation")
             return {"error": "No products found."}
 
@@ -83,6 +92,17 @@ async def jaipur_rugs_product_search(
         else:
             raw_results = await asyncio.to_thread(mongo_search_products, clean_keyword)
             search_source = "mongo-search"
+
+        size_cm_terms = attribute_filters.get("size_cm") or set()
+        if not raw_results and size_cm_terms:
+            logger.info("[SEARCH] cm size token miss — scanning SizeInCM catalogue")
+            raw_results = await asyncio.to_thread(mongo_search_cm_products, size_cm_terms)
+            search_source = "mongo-cm-size"
+
+        if not raw_results and attribute_filters.get("multicolor"):
+            logger.info("[SEARCH] multicolor token miss — scanning in-stock catalogue")
+            raw_results = await asyncio.to_thread(get_instock_products)
+            search_source = "mongo-catalogue-multicolor"
 
         logger.info(f"[SEARCH] raw results from {search_source}: {len(raw_results)}")
 
@@ -110,7 +130,16 @@ async def jaipur_rugs_product_search(
             logger.warning("[SEARCH] 0 products after filters")
             return {"error": "No products found."}
 
-        selected = random.sample(unique_results, min(3, len(unique_results)))
+        displayable = [p for p in unique_results if _is_displayable_product(p)]
+        if not displayable:
+            logger.warning("[SEARCH] 0 displayable products after URL/image validation")
+            return {"error": "No products found."}
+        if len(displayable) < len(unique_results):
+            logger.info(
+                f"[SEARCH] displayable filter: {len(unique_results)} → {len(displayable)}"
+            )
+
+        selected = random.sample(displayable, min(3, len(displayable)))
         logger.info(f"[SEARCH] selected {len(selected)} product(s) for response")
 
         currency = requested_currency or ""
@@ -143,6 +172,7 @@ async def jaipur_rugs_product_search(
                 "SKU": sku,
                 "collection": p.get("Collection", ""),
                 "size": p.get("SizeInFT", ""),
+                "size_cm": p.get("SizeInCM", ""),
                 "shape": p.get("Shape", ""),
                 "color": p.get("GrColor", ""),
                 "border_color": p.get("BrColor", ""),

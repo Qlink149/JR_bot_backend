@@ -2,6 +2,7 @@ import re
 
 from qlink_chatbot.database.mongo_utils import db
 from qlink_chatbot.utils.jr_search_aliases import SHAPE_ALIASES, SIZE_PATTERN
+from qlink_chatbot.utils.jr_search_sizes import parse_cm_field
 from qlink_chatbot.utils.logger_config import logger
 
 products_collection = db["products"]
@@ -40,13 +41,23 @@ def build_search_tokens(product: dict) -> list[str]:
     for field in _COLOR_TOKEN_FIELDS:
         add(product.get(field))
 
+    display_filter = (product.get("DisplayFilter") or "").lower()
+    if re.search(r"\b(multi|multicolor|multicolour)\b", display_filter):
+        tokens.update({"multi", "multicolor", "multicolour"})
+
     # Avoid broad tokens like "red" from "Red and Orange" family labels.
     color_family = (product.get("ColorFamily") or "").strip()
     if color_family and " and " not in color_family.lower():
         add(color_family)
+    if color_family.lower() == "multi":
+        tokens.update({"multi", "multicolor", "multicolour"})
 
     for field in _NON_COLOR_TOKEN_FIELDS:
         add(product.get(field))
+
+    cm_dims = parse_cm_field(str(product.get("SizeInCM") or ""))
+    if cm_dims:
+        tokens.add(f"{cm_dims[0]}x{cm_dims[1]}")
 
     shape = (product.get("Shape") or "").strip()
     if shape:

@@ -212,6 +212,12 @@ _PRODUCT_SHOW_MORE_PHRASES = {
     "show others", "other rugs", "more options",
 }
 
+_SEARCH_INTENT_RE = re.compile(
+    r"\b(show me|show|find|search|looking for|look for|i want|i need|"
+    r"under \d|above \d|below \d|over \d|\d+\s*kg|lightweight|light weight)\b",
+    re.IGNORECASE,
+)
+
 
 def _last_assistant_message(chat_history) -> str:
     for msg in reversed(chat_history or []):
@@ -343,7 +349,26 @@ def _is_product_detail_followup(user_message: str, chat_history) -> bool:
         return False
     if _is_product_show_more_followup(user_message, chat_history):
         return False
-    return any(phrase in msg for phrase in _PRODUCT_DETAIL_PHRASES)
+    if _SEARCH_INTENT_RE.search(msg):
+        return False
+    return any(re.search(rf"\b{re.escape(phrase)}\b", msg) for phrase in _PRODUCT_DETAIL_PHRASES)
+
+
+def _is_new_product_search_request(user_message: str, chat_history, previous_searches=None) -> bool:
+    """True when the user is asking for a fresh catalog search, not a detail follow-up."""
+    if _is_product_detail_followup(user_message, chat_history):
+        return False
+    if _is_store_query(user_message, chat_history, previous_searches):
+        return False
+    msg = (user_message or "").lower().strip()
+    if _SEARCH_INTENT_RE.search(msg):
+        return True
+    search_verbs = (
+        "show me", "show", "find", "search", "do you have", "looking for",
+        "look for", "i want", "i need", "any ",
+    )
+    rug_terms = ("rug", "rugs", "carpet", "carpets")
+    return any(v in msg for v in search_verbs) and any(t in msg for t in rug_terms)
 
 def agent_alert_tool(alert, sesson_id):
     """Tool function to raise an agent alert"""
@@ -616,7 +641,7 @@ async def chat_agent(
             {"role": "developer", "content": f"Current date and time: {_ist_time_str}"},
             {"role": "developer", "content": f"Agent live status: {agent_status['label']}. Business hours: {agent_status['business_hours']}. If Offline, use this message for handoff requests: {agent_status['offline_message']}"},
             {"role": "developer", "content": f"users country code: {country_code}"},
-            {"role": "developer", "content": f"User's detected local currency: {detected_currency or 'INR'}. Show product prices in this currency by default unless the user explicitly asks for a different one."},
+            {"role": "developer", "content": f"User's detected local currency: {detected_currency or 'INR'}. For product search results, always show the exact `display_price` from tool output — do not convert to {detected_currency or 'INR'} unless that is already the currency in `display_price`."},
             {
                 "role": "developer",
                 "content": f"user name: {user_name(session_id=session_id, collection_name=collection_name)}",
@@ -628,7 +653,7 @@ async def chat_agent(
             {"role": "developer", "content": "For ANY question about stores, showrooms, retail locations, physical presence, address, directions, or timing — including 'do you have stores?', 'do we have stores?', 'any retail store?', 'do we have a retail store?', 'where is your nearest store?', 'nearest store', 'is there a store in [city]?', 'where can I see rugs?' — ALWAYS call `search_store_locations` first (use query 'all stores' if no city given). NEVER answer store questions from your own knowledge. Use only the data returned by the tool."},
             {"role": "developer", "content": "STORE FORMAT — when showing store results, format each store exactly like this:\n**[Store Name]**\n- Address: [full address]\n- Phone: [phone]\n- Timing: [timing]\n\nShow up to 3 stores. If more exist, offer to show more. Never combine multiple stores into a single paragraph."},
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
-            {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search`; do not recalculate, convert, or pick another MRP value. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
+            {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search` in the Price line — copy it verbatim. Do not recalculate, convert, or substitute INR when `display_price` is USD/EUR/GBP/etc. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
             {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, or any non-product response."},
             {
                 "role": "user",
@@ -650,8 +675,10 @@ async def chat_agent(
                 "content": (
                     "Latest shown products for follow-up Q&A "
                     f"(last search keyword: {latest_keyword!r}). "
-                    "Use this JSON for price, size, material, weight, SKU, link, or color questions. "
-                    "Do NOT call jaipur_rugs_product_search for these detail follow-ups: "
+                    "Use this JSON only when the user asks about a rug already listed below "
+                    "(price, size, material, weight, SKU, link, or color of a shown product). "
+                    "If the user starts a NEW search with different criteria, call "
+                    "jaipur_rugs_product_search instead of filtering these results yourself: "
                     f"{format_recent_products_for_ai(previous_searches)}"
                 ),
             })
@@ -663,6 +690,15 @@ async def chat_agent(
                     "This message is a follow-up about previously shown products. "
                     "Answer from Latest shown products context only. "
                     "Do NOT call jaipur_rugs_product_search."
+                ),
+            })
+        elif _is_new_product_search_request(user_message, chat_history, previous_searches):
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    "This is a NEW product search request. You MUST call "
+                    "jaipur_rugs_product_search with an appropriate keyword. "
+                    "Do NOT answer from previously shown products or guess availability."
                 ),
             })
 
@@ -837,6 +873,65 @@ async def chat_agent(
                     "call_id": item.call_id,
                     "output": output
                 })
+
+        # Step 2b: Force product search when the model skipped the tool on a clear search request
+        if (
+            not has_tool_calls
+            and _is_new_product_search_request(user_message, chat_history, previous_searches)
+        ):
+            keyword = resolve_search_keyword({}, user_message)
+            keyword_sent_to_api = normalise_search_keyword(keyword)
+            logger.info(
+                f"[AGENT-FORCE-SEARCH] session={session_id} "
+                f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r}"
+            )
+            products = await jaipur_rugs_product_search(
+                keyword,
+                client_ip=client_ip,
+                country_code=country_code,
+            )
+            product_count = len(products) if isinstance(products, list) else 0
+            save_previous_search(
+                session_id,
+                keyword,
+                products,
+                collection_name=collection_name,
+            )
+            if debug_collector is not None:
+                debug_collector.append({
+                    "tool": "jaipur_rugs_product_search",
+                    "keyword": keyword_sent_to_api,
+                    "keyword_raw": keyword,
+                    "keyword_sent_to_api": keyword_sent_to_api,
+                    "currency": "",
+                    "products_found": product_count,
+                    "forced": True,
+                    "products": [
+                        {
+                            "name": p.get("name", ""),
+                            "SKU": p.get("SKU", ""),
+                            "GrColor": p.get("color", ""),
+                            "BrColor": p.get("border_color", ""),
+                            "ColorFamily": p.get("color_family", ""),
+                            "DisplayFilter": p.get("display_filter", ""),
+                            "ColorMood": p.get("color_mood", ""),
+                            "Pattern": p.get("pattern", ""),
+                            "size": p.get("size", ""),
+                            "material": p.get("material", ""),
+                            "display_price": p.get("display_price", ""),
+                        }
+                        for p in (products[:3] if isinstance(products, list) else [])
+                    ],
+                })
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    f"Auto-ran jaipur_rugs_product_search(keyword={keyword_sent_to_api!r}). "
+                    f"Present the results below using the standard product card format. "
+                    f"Results JSON: {json.dumps(products)}"
+                ),
+            })
+            has_tool_calls = True
 
         # Step 3: Final model response — called ONCE after all tool outputs are collected
         if has_tool_calls:

@@ -144,7 +144,9 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
     operators = "|".join(
         re.escape(w) for w in sorted(PRICE_OPERATOR_WORDS, key=len, reverse=True)
     )
-    amount = r"([\d,]+(?:\.\d+)?)\s*(k|thousand|lacs?|lakhs?|lakh|lc|l|cr|crores?|m|million)?"
+    amount_core = r"([\d,]+(?:\.\d+)?)"
+    amount_suffix = r"(?:(?<![a-z])(?:k|thousand|lacs?|lakhs?|lakh|lc|cr|crores?|m|million)(?![a-z]))?"
+    amount = rf"{amount_core}\s*{amount_suffix}"
 
     range_match = re.search(
         rf"\bbetween\s+(?:({alias_pattern})\s*)?{amount}\s+"
@@ -166,12 +168,13 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
         )
 
     patterns = [
+        rf"\b({operators})\b\s+({alias_pattern})\s+{amount_core}{amount_suffix}\b",
         rf"\b({operators})\b\s*{amount}\s*({alias_pattern})\b",
         rf"\b({operators})\b\s*(?:({alias_pattern})\s*)?{amount}",
         rf"\b(?:({alias_pattern})\s*)?{amount}\s*\b({operators})\b",
-        rf"\b({alias_pattern})\s+{amount}\b",
-        rf"\b{amount}\s*({alias_pattern})\b",
-        rf"\b{amount}\b",
+        rf"\b({alias_pattern})\s+{amount_core}{amount_suffix}\b",
+        rf"\b{amount_core}{amount_suffix}\s*({alias_pattern})\b",
+        rf"\b{amount_core}{amount_suffix}\b",
     ]
     for idx, pattern in enumerate(patterns):
         m = re.search(pattern, text)
@@ -179,19 +182,21 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
             continue
         groups = m.groups()
         if idx == 0:
-            op, at, sf, cur = groups
+            op, cur, at, sf = groups[0], groups[1], groups[2], groups[3] if len(groups) > 3 else ""
         elif idx == 1:
-            op, cur, at, sf = groups
+            op, at, sf, cur = groups
         elif idx == 2:
-            cur, at, sf, op = groups
+            op, cur, at, sf = groups
         elif idx == 3:
+            cur, at, sf, op = groups
+        elif idx == 4:
             cur, at, sf = groups
             op = "budget"
-        elif idx == 4:
+        elif idx == 5:
             at, sf, cur = groups
             op = "budget"
         else:
-            at, sf = groups
+            at, sf = groups[0], groups[1] if len(groups) > 1 else ""
             cur = DEFAULT_CURRENCY
             op = "budget"
 

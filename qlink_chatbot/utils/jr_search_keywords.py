@@ -4,14 +4,21 @@ from qlink_chatbot.utils.jr_search_aliases import (
     COLOR_ALIASES,
     CONSTRUCTION_KEYWORDS,
     MATERIAL_KEYWORDS,
+    MULTICOLOR_KEYS,
     NOISE_WORDS,
     PATTERN_ALIASES,
     ROOM_KEYWORDS,
+    ROUND_SIZE_PATTERN,
     SHAPE_ALIASES,
     SIZE_PATTERN,
     WEIGHT_PATTERN,
 )
 from qlink_chatbot.utils.jr_search_currency import extract_price_filter_from_text
+from qlink_chatbot.utils.jr_search_sizes import (
+    is_cm_dimensions,
+    normalise_cm_size_term,
+    parse_requested_cm_size,
+)
 
 
 def expand_term(segment: str, *, multi_attribute: bool = False) -> str:
@@ -40,6 +47,8 @@ def expand_term(segment: str, *, multi_attribute: bool = False) -> str:
         return SHAPE_ALIASES[key]
     if key in PATTERN_ALIASES:
         return PATTERN_ALIASES[key]
+    if key in MULTICOLOR_KEYS:
+        return "multicolor"
     if key in COLOR_ALIASES and "||" not in COLOR_ALIASES[key]:
         return COLOR_ALIASES[key]
     return segment.strip()
@@ -74,6 +83,18 @@ def preprocess_natural_language(keyword: str) -> str:
             found.append(alias)
             remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
 
+    for alias in sorted(MULTICOLOR_KEYS, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+            found.append("multicolor")
+            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+            break
+
+    for match in ROUND_SIZE_PATTERN.finditer(remaining):
+        found.append(f"{match.group(1)} round")
+        if "round" not in found:
+            found.append("round")
+    remaining = ROUND_SIZE_PATTERN.sub(" ", remaining).strip()
+
     for alias in sorted(SHAPE_ALIASES, key=len, reverse=True):
         if re.search(rf"\b{re.escape(alias)}\b", remaining):
             found.append(alias)
@@ -95,16 +116,31 @@ def preprocess_natural_language(keyword: str) -> str:
         remaining = remaining[:weight_match.start()] + remaining[weight_match.end():]
 
     for m in SIZE_PATTERN.finditer(remaining):
-        found.append(f"{m.group(1)}x{m.group(2)}")
+        size_text = f"{m.group(1)}x{m.group(2)}"
+        if is_cm_dimensions(int(m.group(1)), int(m.group(2)), remaining):
+            found.append(f"{size_text}cm")
+        else:
+            found.append(size_text)
 
     if len(found) >= 2:
         return "&".join(found)
+    if len(found) == 1:
+        if WEIGHT_PATTERN.search(found[0]):
+            return found[0].replace(" ", "")
+        if found[0].lower() in MULTICOLOR_KEYS:
+            return "multicolor"
+        if parse_requested_cm_size(found[0]):
+            return found[0]
     return keyword.strip()
 
 
 def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -> None:
     key = segment_key.strip().lower()
     if not key:
+        return
+
+    if key in MULTICOLOR_KEYS:
+        attribute_filters["multicolor"].add("multicolor")
         return
 
     if key in COLOR_ALIASES:
@@ -127,7 +163,17 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
     if SIZE_PATTERN.search(key):
         m = SIZE_PATTERN.search(key)
         if m:
-            attribute_filters["size"].add(f"{m.group(1)}x{m.group(2)}".lower())
+            a, b = int(m.group(1)), int(m.group(2))
+            if is_cm_dimensions(a, b, key):
+                attribute_filters["size_cm"].add(normalise_cm_size_term(a, b))
+            else:
+                attribute_filters["size"].add(f"{a}x{b}".lower())
+        return
+
+    round_match = ROUND_SIZE_PATTERN.search(key)
+    if round_match:
+        attribute_filters["size"].add(f"{round_match.group(1)} round".lower())
+        attribute_filters["shape"].add("round")
         return
 
     for kw in sorted(CONSTRUCTION_KEYWORDS, key=len, reverse=True):
@@ -157,9 +203,9 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
     clean_segments = []
     color_check_terms: set[str] = set()
     attribute_filters: dict[str, set] = {
-        "color": set(), "shape": set(), "size": set(),
+        "color": set(), "shape": set(), "size": set(), "size_cm": set(),
         "material": set(), "construction": set(), "pattern": set(),
-        "room": set(), "weight_max": set(),
+        "room": set(), "weight_max": set(), "multicolor": set(),
     }
 
     for segment in keyword.split("&"):
@@ -167,7 +213,23 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         if not segment:
             continue
 
-        segment = SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", segment)
+        segment = ROUND_SIZE_PATTERN.sub(lambda m: f"{m.group(1)} round", segment)
+        size_match = SIZE_PATTERN.search(segment)
+        if size_match:
+            a, b = int(size_match.group(1)), int(size_match.group(2))
+            if is_cm_dimensions(a, b, segment):
+                attribute_filters["size_cm"].add(normalise_cm_size_term(a, b))
+            segment = SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", segment)
+        else:
+            segment = SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", segment)
+
+        weight_match = WEIGHT_PATTERN.search(segment)
+        weight_token = ""
+        if weight_match:
+            attribute_filters["weight_max"].add(float(weight_match.group(1)))
+            weight_token = weight_match.group(0).replace(" ", "").lower()
+            segment = (segment[:weight_match.start()] + segment[weight_match.end():]).strip()
+
         price_filter, residual = extract_price_filter_from_text(segment)
         if price_filter:
             overall_price_filter = price_filter
@@ -177,6 +239,8 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         segment = " ".join(words).strip()
         if segment:
             pending_segments.append(segment)
+        elif weight_token:
+            pending_segments.append(weight_token)
 
     multi_attribute = len(pending_segments) > 1
 
@@ -186,7 +250,9 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         key = segment.strip().lower()
         track_attribute_terms(key, attribute_filters)
 
-        if key in COLOR_ALIASES:
+        if key in MULTICOLOR_KEYS:
+            pass
+        elif key in COLOR_ALIASES:
             color_check_terms.add(key)
             expansion = COLOR_ALIASES[key]
             if "||" not in expansion:
@@ -209,8 +275,19 @@ def normalise_search_keyword(keyword: str) -> str:
 
 
 def resolve_search_keyword(args: dict | None, user_message: str = "") -> str:
+    model_kw = ""
     for key in ("keyword", "query", "search", "search_keyword", "keywords"):
         value = (args or {}).get(key)
         if value and str(value).strip():
-            return str(value).strip()
-    return (user_message or "").strip()
+            model_kw = str(value).strip()
+            break
+
+    message = (user_message or "").strip()
+    if message:
+        parsed = preprocess_natural_language(message)
+        if "&" in parsed:
+            return parsed
+        if parsed.strip().lower() != message.strip().lower():
+            return parsed
+
+    return model_kw or message

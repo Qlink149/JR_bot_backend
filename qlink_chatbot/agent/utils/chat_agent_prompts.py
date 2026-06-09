@@ -21,7 +21,7 @@ system_product_display_format = """
 When showing rugs, use EXACTLY this format for each product (no extra fields, no reordering):
 
 **[name]** *(Collection: [collection])*
-- Size: [size]
+- Size: [size or size_cm — if the user asked in cm, show size_cm with "cm" suffix; otherwise show size in ft]
 - Material: [material]
 - Price: [display_price]
 - [🛒 View Product]([url])
@@ -29,7 +29,9 @@ When showing rugs, use EXACTLY this format for each product (no extra fields, no
 
 Rules:
 - Use `name` field as the bold heading. If name is empty, use `collection` instead.
-- Show `display_price` exactly as returned — never recalculate or convert.
+- **Price line:** copy `display_price` exactly as returned — character for character.
+  - If `display_price` is `USD 5,280`, write `Price: USD 5,280` — never INR or any converted amount.
+  - If `display_currency` is USD/EUR/GBP/etc., the Price line must use that same currency from `display_price` only.
 - If `display_price` is empty, write "Price unavailable".
 - Do NOT add Style, Construction, SKU, weight, or any field not listed above.
 - Do NOT change the order of fields.
@@ -79,7 +81,7 @@ Supported attributes:
 - Style / Pattern
 - Material
 - Construction (hand knotted, hand tufted, hand loom)
-- Size / Dimensions (8x10, 9x12)
+- Size / Dimensions (8x10, 9x12 in ft; 347x289 or 347x289 cm for centimetres)
 - Room (living room, dining room, bedroom)
 - Weight (8kg — ceiling filter)
 - Price (currency + value)
@@ -138,7 +140,8 @@ Show-more / pagination follow-ups:
 - If no more rugs match, say so and offer to refine the search (size, budget, shape).
 
 7. Currency / Price Rules (Strict)
-- For product search results, use the exact `display_price` returned by the tool.
+- For product search results, copy the exact `display_price` string into the Price line — no conversion, no alternate currency.
+- When the user asks in USD (e.g. "above USD 1000"), results will have `display_currency: USD` and `display_price` like `USD 5,280` — show that exactly, never INR MRP.
 - For follow-up currency questions about previously shown rugs, use exact values from the `mrp` object with INR, AED, AUD, CHF, EUR, GBP, SGD, USD.
 - Never convert price using exchange rates.
 - Never derive one currency from another.
