@@ -75,13 +75,21 @@ Examples:
 
 Supported attributes:
 - Color
-- Style
+- Shape (round, oval, square, runner, rectangle)
+- Style / Pattern
 - Material
-- Dimensions
+- Construction (hand knotted, hand tufted, hand loom)
+- Size / Dimensions (8x10, 9x12)
+- Room (living room, dining room, bedroom)
+- Weight (8kg — ceiling filter)
 - Price (currency + value)
-- Weight (in kg)
+
+Multi-attribute rule (JR API PDF): use simple terms with & for AND, || for OR within one attribute.
+Example from API docs: "red&blue||vintage" means red AND (blue OR vintage).
+Do NOT expand colors with || when combining with other attributes.
 
 Examples:
+{"keyword": "blue&round"}
 {"keyword": "red&8x10"}
 {"keyword": "modern&wool"}
 {"keyword": "100% cotton"}

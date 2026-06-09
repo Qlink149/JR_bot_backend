@@ -1,5 +1,6 @@
 import random
 import re
+from datetime import datetime
 
 import httpx
 
@@ -10,6 +11,7 @@ from qlink_chatbot.utils.logger_config import logger
 # Kept for dashboard_routes imports
 products_collection = db["products"]
 product_color_collection = db["product_color"]
+search_cache_collection = db["product_search_cache"]
 
 # ---------------------------------------------------------------------------
 # Currency
@@ -265,6 +267,7 @@ def _apply_price_filter(products: list, price_filter: dict) -> list:
 _SIZE_PATTERN = re.compile(
     r"\b(\d+)\s*(?:x|by|\*|X)\s*(\d+)\b", re.IGNORECASE
 )
+_WEIGHT_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*kg\b", re.IGNORECASE)
 _NOISE_WORDS = {
     "show", "me", "find", "search", "looking", "look", "need", "want",
     "please", "rug", "rugs", "carpet", "carpets", "in", "the", "a", "an",
@@ -338,6 +341,19 @@ _COLOR_ALIASES: dict[str, str] = {
     "colorful":     "Multi",
 }
 
+# Maps shape user words → exact JR API catalog Shape values
+_SHAPE_ALIASES: dict[str, str] = {
+    "round":        "Round",
+    "circular":     "Round",
+    "circle":       "Round",
+    "oval":         "Oval",
+    "square":       "Square",
+    "runner":       "Runner",
+    "rectangular":  "Rectangle",
+    "rectangle":    "Rectangle",
+    "irregular":    "Irregular",
+}
+
 # Maps pattern/style user words → exact JR API catalog values
 _PATTERN_ALIASES: dict[str, str] = {
     "solid":        "Solid",
@@ -359,22 +375,158 @@ _PATTERN_ALIASES: dict[str, str] = {
     "vintage":      "Traditional",
 }
 
+_MATERIAL_KEYWORDS = (
+    "wool and bamboo silk", "wool and viscose", "bamboo silk", "pure silk",
+    "wool", "silk", "viscose", "cotton", "bamboo", "jute", "leather", "nylon",
+)
+_CONSTRUCTION_KEYWORDS = (
+    "hand knotted", "hand tufted", "hand loom", "hand woven", "flat weave",
+    "machine made", "handmade",
+)
+_ROOM_KEYWORDS = (
+    "living room", "dining room", "bedroom", "outdoor", "bathroom",
+    "kitchen", "hallway", "office", "kids room", "entryway",
+)
 
-def _expand_term(segment: str) -> str:
-    """Expand a keyword segment using color/pattern aliases.
-    Handles segments that already contain || by expanding each OR part individually.
+
+def _expand_term(segment: str, *, multi_attribute: bool = False) -> str:
+    """Expand a keyword segment for the JR API.
+
+    JR API rules (verified against product-master-search):
+    - Single attribute: color || expansion helps (e.g. pink → Pink||Blush||Rose||...)
+    - Multi attribute (&): keep simple terms (e.g. blue&round). Color || expansion
+      breaks AND and the second attribute is ignored.
     """
     if "||" in segment:
         expanded = []
         for part in segment.split("||"):
             key = part.strip().lower()
-            expanded.append(_COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or part.strip())
+            if key in _SHAPE_ALIASES:
+                expanded.append(_SHAPE_ALIASES[key])
+            elif multi_attribute:
+                expanded.append(part.strip())
+            else:
+                expanded.append(
+                    _COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or part.strip()
+                )
         return "||".join(expanded)
+
     key = segment.strip().lower()
+    if key in _SHAPE_ALIASES:
+        return _SHAPE_ALIASES[key]
+    if multi_attribute:
+        if key in _PATTERN_ALIASES:
+            return _PATTERN_ALIASES[key]
+        return segment.strip()
     return _COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or segment
 
 
-def _normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str]]:
+def _preprocess_natural_language(keyword: str) -> str:
+    """Convert natural language like 'show me blue round rugs' → 'blue&round'."""
+    text = (keyword or "").lower().strip()
+    if "&" in text:
+        return keyword.strip()
+
+    text = _SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", text)
+    words = [w for w in re.split(r"[\s,]+", text) if w and w not in _NOISE_WORDS]
+    if not words:
+        return keyword.strip()
+
+    found: list[str] = []
+    remaining = " ".join(words)
+
+    for kw in sorted(_CONSTRUCTION_KEYWORDS, key=len, reverse=True):
+        if kw in remaining:
+            found.append(kw)
+            remaining = remaining.replace(kw, " ").strip()
+
+    for kw in sorted(_MATERIAL_KEYWORDS, key=len, reverse=True):
+        if kw in remaining:
+            found.append(kw)
+            remaining = remaining.replace(kw, " ").strip()
+
+    for alias in sorted(_COLOR_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+            found.append(alias)
+            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+
+    for alias in sorted(_SHAPE_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+            found.append(alias)
+            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+
+    for alias in sorted(_PATTERN_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+            found.append(alias)
+            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+
+    for room in sorted(_ROOM_KEYWORDS, key=len, reverse=True):
+        if room in remaining:
+            found.append(room)
+            remaining = remaining.replace(room, " ").strip()
+
+    weight_match = _WEIGHT_PATTERN.search(remaining)
+    if weight_match:
+        found.append(weight_match.group(0).replace(" ", ""))
+        remaining = remaining[:weight_match.start()] + remaining[weight_match.end():]
+
+    for m in _SIZE_PATTERN.finditer(remaining):
+        found.append(f"{m.group(1)}x{m.group(2)}")
+
+    if len(found) >= 2:
+        return "&".join(found)
+    return keyword.strip()
+
+
+def _track_attribute_terms(segment_key: str, attribute_filters: dict[str, set[str]]) -> None:
+    """Record post-filter terms for each attribute type in the query."""
+    key = segment_key.strip().lower()
+    if not key:
+        return
+
+    if key in _COLOR_ALIASES:
+        attribute_filters["color"].add(key)
+        for part in _COLOR_ALIASES[key].split("||"):
+            attribute_filters["color"].add(part.strip().lower())
+        return
+
+    if key in _SHAPE_ALIASES:
+        attribute_filters["shape"].add(_SHAPE_ALIASES[key].lower())
+        attribute_filters["shape"].add(key)
+        return
+
+    if key in _PATTERN_ALIASES:
+        attribute_filters["pattern"].add(_PATTERN_ALIASES[key].lower())
+        attribute_filters["pattern"].add(key)
+        return
+
+    if _SIZE_PATTERN.search(key):
+        m = _SIZE_PATTERN.search(key)
+        if m:
+            attribute_filters["size"].add(f"{m.group(1)}x{m.group(2)}".lower())
+        return
+
+    for kw in sorted(_CONSTRUCTION_KEYWORDS, key=len, reverse=True):
+        if kw in key:
+            attribute_filters["construction"].add(kw)
+            return
+
+    for kw in sorted(_MATERIAL_KEYWORDS, key=len, reverse=True):
+        if kw in key:
+            attribute_filters["material"].add(kw)
+            return
+
+    for room in sorted(_ROOM_KEYWORDS, key=len, reverse=True):
+        if room in key:
+            attribute_filters["room"].add(room)
+            return
+
+    weight_match = _WEIGHT_PATTERN.search(key)
+    if weight_match:
+        attribute_filters["weight_max"].add(float(weight_match.group(1)))
+
+
+def _normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[str, set]]:
     """
     1. Extract price filter (won't be understood by JR API).
     2. Normalise size tokens (8 x 10 → 8x10, 8 by 10 → 8x10).
@@ -383,17 +535,22 @@ def _normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str]]:
     color_check_terms: lowercase OR alternatives from color alias expansions, used for
     post-result relevance filtering.
     """
-    keyword = (keyword or "").strip()
+    keyword = _preprocess_natural_language((keyword or "").strip())
     overall_price_filter = None
+    pending_segments: list[str] = []
     clean_segments = []
     color_check_terms: set[str] = set()
+    attribute_filters: dict[str, set] = {
+        "color": set(), "shape": set(), "size": set(),
+        "material": set(), "construction": set(), "pattern": set(),
+        "room": set(), "weight_max": set(),
+    }
 
     for segment in keyword.split("&"):
         segment = segment.strip().lower()
         if not segment:
             continue
 
-        # Normalise size formats before price extraction so "8 x 10" isn't consumed
         segment = _SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", segment)
 
         price_filter, residual = _extract_price_filter_from_text(segment)
@@ -401,38 +558,41 @@ def _normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str]]:
             overall_price_filter = price_filter
             segment = residual.strip()
 
-        # Drop noise from residual
         words = [w for w in segment.split() if w.lower() not in _NOISE_WORDS]
         segment = " ".join(words).strip()
 
-        if not segment:
-            continue
+        if segment:
+            pending_segments.append(segment)
 
-        expanded = _expand_term(segment)
+    multi_attribute = len(pending_segments) > 1
+
+    for segment in pending_segments:
+        expanded = _expand_term(segment, multi_attribute=multi_attribute)
         clean_segments.append(expanded)
 
-        # Track color terms from alias expansions for post-result filtering.
-        # Only COLOR aliases qualify (not pattern aliases, not raw unmatched terms).
         key = segment.strip().lower()
+        _track_attribute_terms(key, attribute_filters)
+
         if key in _COLOR_ALIASES:
             for part in expanded.split("||"):
                 color_check_terms.add(part.strip().lower())
         elif "||" in segment:
-            # Handle pre-expanded OR segments: check each part individually
             for part in segment.split("||"):
                 part_key = part.strip().lower()
                 if part_key in _COLOR_ALIASES:
-                    part_exp = _COLOR_ALIASES[part_key]
-                    for term in part_exp.split("||"):
+                    for term in _COLOR_ALIASES[part_key].split("||"):
                         color_check_terms.add(term.strip().lower())
 
+    if not color_check_terms and attribute_filters["color"]:
+        color_check_terms = set(attribute_filters["color"])
+
     clean_keyword = "&".join(clean_segments)
-    return overall_price_filter, clean_keyword, color_check_terms
+    return overall_price_filter, clean_keyword, color_check_terms, attribute_filters
 
 
 def normalise_search_keyword(keyword: str) -> str:
     """Return the cleaned/expanded keyword that will be sent to the JR API."""
-    _, clean, _ = _normalise_keyword(keyword)
+    _, clean, _, _ = _normalise_keyword(keyword)
     return clean
 
 
@@ -445,35 +605,217 @@ def resolve_search_keyword(args: dict | None, user_message: str = "") -> str:
     return (user_message or "").strip()
 
 # ---------------------------------------------------------------------------
-# MongoDB product search (same catalogue synced from JR API)
+# MongoDB product search — mirrors JR API field routing + post-filters
 # ---------------------------------------------------------------------------
 
-_MONGO_SEARCH_FIELDS = (
-    "raw.GrColor", "raw.BrColor", "raw.ColorFamily", "raw.DisplayFilter",
-    "raw.ColorMood", "raw.Pattern", "raw.Style", "raw.Material",
-    "raw.MaterialDetails", "raw.Construction", "raw.SizeInFT",
-    "raw.Name", "raw.Collection", "raw.Design", "raw.FullDescription",
+def _collect_known_catalog_values() -> tuple[set[str], set[str]]:
+    colors: set[str] = set()
+    patterns: set[str] = set()
+    for key, expansion in _COLOR_ALIASES.items():
+        colors.add(key.lower())
+        for part in expansion.split("||"):
+            colors.add(part.strip().lower())
+    for key, value in _PATTERN_ALIASES.items():
+        patterns.add(key.lower())
+        patterns.add(value.lower())
+    return colors, patterns
+
+
+_KNOWN_COLOR_VALUES, _KNOWN_PATTERN_VALUES = _collect_known_catalog_values()
+_KNOWN_SHAPE_VALUES = {k.lower() for k in _SHAPE_ALIASES} | {v.lower() for v in _SHAPE_ALIASES.values()}
+
+# All searchable product fields from JR Product Master / Search API (PDF spec)
+_API_SEARCH_FIELDS = (
+    "ProductType", "Name", "Collection", "Design", "SKU", "BarCode", "ProductURL",
+    "GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood", "BasicColor",
+    "Style", "StylePattern", "Pattern", "DecoreStyle", "Designer",
+    "SizeInFT", "SizeGroupInFT", "SizeInCM", "SizeGroupInCM",
+    "Material", "MaterialDetails", "MaterialFamilies",
+    "Construction", "Quality", "Texture", "Shape",
+    "Room", "MultiFilter", "FullDescription", "ShortDescription",
+    "PileThickness", "ProductTag",
 )
+
+_MONGO_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "color": (
+        "raw.GrColor", "raw.BrColor", "raw.ColorFamily",
+        "raw.DisplayFilter", "raw.ColorMood", "raw.BasicColor",
+    ),
+    "pattern": ("raw.Pattern", "raw.Style", "raw.StylePattern", "raw.DecoreStyle"),
+    "size": ("raw.SizeInFT", "raw.SizeInCM"),
+    "material": ("raw.Material", "raw.MaterialDetails", "raw.MaterialFamilies"),
+    "construction": ("raw.Construction",),
+    "shape": ("raw.Shape",),
+    "room": ("raw.Room", "raw.MultiFilter"),
+    "general": tuple(f"raw.{f}" for f in _API_SEARCH_FIELDS),
+}
+
+
+def _size_regex(size_text: str) -> str:
+    """Build a flexible size regex (8x10, 8'x10) without matching 18x10 for 8x10."""
+    m = _SIZE_PATTERN.search(size_text.strip())
+    if not m:
+        return re.escape(size_text.strip())
+    a, b = m.group(1), m.group(2)
+    return rf"(?<!\d){a}\s*['']?\s*[xX*]\s*{b}(?!\d)"
+
+
+def _classify_segment(segment: str) -> str:
+    """Route each keyword segment to the same field group the JR API uses."""
+    parts = [p.strip() for p in segment.split("||") if p.strip()]
+    if not parts:
+        return "general"
+
+    lowered = [p.lower() for p in parts]
+    seg_lower = segment.lower()
+
+    if len(parts) == 1 and _SIZE_PATTERN.search(parts[0]):
+        return "size"
+
+    if all(p in _KNOWN_SHAPE_VALUES for p in lowered):
+        return "shape"
+    if len(parts) == 1 and parts[0].lower() in _KNOWN_SHAPE_VALUES:
+        return "shape"
+
+    color_hits = sum(1 for p in lowered if p in _KNOWN_COLOR_VALUES)
+    if color_hits == len(parts):
+        return "color"
+
+    if all(p in _KNOWN_PATTERN_VALUES for p in lowered):
+        return "pattern"
+
+    for kw in sorted(_CONSTRUCTION_KEYWORDS, key=len, reverse=True):
+        if kw in seg_lower:
+            return "construction"
+
+    for kw in sorted(_MATERIAL_KEYWORDS, key=len, reverse=True):
+        if kw in seg_lower:
+            return "material"
+
+    for room in sorted(_ROOM_KEYWORDS, key=len, reverse=True):
+        if room in seg_lower:
+            return "room"
+
+    if _WEIGHT_PATTERN.search(seg_lower):
+        return "weight"
+
+    if color_hits > 0:
+        return "color"
+
+    return "general"
 
 
 def _segment_to_mongo_clause(segment: str) -> dict:
+    """Build a MongoDB clause for one &-segment, scoped to the correct fields."""
     parts = [p.strip() for p in segment.split("||") if p.strip()]
     if not parts:
         return {}
+
+    segment_type = _classify_segment(segment)
+    fields = _MONGO_FIELDS_BY_TYPE[segment_type]
     or_clauses = []
+
     for part in parts:
-        pattern = re.escape(part)
-        for field in _MONGO_SEARCH_FIELDS:
+        pattern = (
+            _size_regex(part) if segment_type == "size"
+            else re.escape(part)
+        )
+        for field in fields:
             or_clauses.append({field: {"$regex": pattern, "$options": "i"}})
+
     return {"$or": or_clauses} if or_clauses else {}
 
 
-def _mongo_search_products(clean_keyword: str, limit: int = 500) -> list[dict]:
-    """Search synced MongoDB products using the same normalised keyword as the JR API."""
+def _part_matches_product(product: dict, part: str, segment_type: str) -> bool:
+    """In-memory segment match — mirrors how JR API results are interpreted."""
+    fields = [f.replace("raw.", "") for f in _MONGO_FIELDS_BY_TYPE[segment_type]]
+    part_lower = part.strip().lower()
+    if not part_lower:
+        return False
+
+    if segment_type == "color":
+        if _color_field_matches(part_lower, str(product.get("GrColor") or "")):
+            return True
+        for field in ("BrColor", "ColorFamily", "DisplayFilter", "ColorMood"):
+            if _color_field_matches(part_lower, str(product.get(field) or "")):
+                return True
+        return False
+
+    if segment_type == "shape":
+        return _shape_field_matches(part_lower, str(product.get("Shape") or ""))
+
+    if segment_type == "weight":
+        weight_match = _WEIGHT_PATTERN.search(part_lower)
+        if not weight_match:
+            return False
+        max_kg = float(weight_match.group(1))
+        try:
+            weight = float(product.get("Weight") or 0)
+        except (TypeError, ValueError):
+            return False
+        return 0 < weight <= max_kg
+
+    if segment_type == "room":
+        for field in ("Room", "MultiFilter"):
+            if part_lower in str(product.get(field) or "").lower():
+                return True
+        return False
+
+    if segment_type == "general":
+        for field in _API_SEARCH_FIELDS:
+            if part_lower in str(product.get(field) or "").lower():
+                return True
+        return False
+
+    for field in fields:
+        val = str(product.get(field) or "")
+        if segment_type == "size":
+            if re.search(_size_regex(part), val, re.IGNORECASE):
+                return True
+        elif part_lower in val.lower():
+            return True
+    return False
+
+
+def _product_matches_segment(product: dict, segment: str) -> bool:
+    """One &-segment must match (OR across || alternatives)."""
+    parts = [p.strip() for p in segment.split("||") if p.strip()]
+    if not parts:
+        return True
+    segment_type = _classify_segment(segment)
+    return any(_part_matches_product(product, p, segment_type) for p in parts)
+
+
+def _filter_products_by_clean_keyword(products: list[dict], clean_keyword: str) -> list[dict]:
+    """Apply the same &-segment AND logic the JR API search uses."""
+    segments = [s.strip() for s in clean_keyword.split("&") if s.strip()]
+    if not segments:
+        return products
+    return [p for p in products if all(_product_matches_segment(p, seg) for seg in segments)]
+
+
+def _mongo_get_instock_products() -> list[dict]:
+    """Return all in-stock products synced from JR Product Master API."""
+    cursor = products_collection.find({"flags.inStock": True}, {"_id": 0, "raw": 1})
+    return [doc["raw"] for doc in cursor if doc.get("raw")]
+
+
+def _mongo_search_products(clean_keyword: str, candidate_limit: int = 5000) -> list[dict]:
+    """Primary search — mirrors JR product-master-search (& = AND, || = OR).
+
+    Uses MongoDB for fast candidate retrieval, then applies identical in-memory
+    segment rules as the website search API on synced Product Master data.
+    """
     if not clean_keyword:
         return []
 
     segments = [s.strip() for s in clean_keyword.split("&") if s.strip()]
+    segment_types = [_classify_segment(s) for s in segments]
+    logger.info(
+        f"[MONGO] search clean_keyword={clean_keyword!r} "
+        f"segments={list(zip(segments, segment_types))}"
+    )
+
     and_clauses = [clause for seg in segments if (clause := _segment_to_mongo_clause(seg))]
     query: dict = {"flags.inStock": True}
     if and_clauses:
@@ -482,23 +824,67 @@ def _mongo_search_products(clean_keyword: str, limit: int = 500) -> list[dict]:
     cursor = (
         products_collection.find(query, {"_id": 0, "raw": 1})
         .sort("raw.ModifyDate", -1)
-        .limit(limit)
+        .limit(candidate_limit)
     )
-    results = []
-    for doc in cursor:
-        raw = doc.get("raw")
-        if raw:
-            results.append(raw)
+    candidates = [doc["raw"] for doc in cursor if doc.get("raw")]
+    results = _filter_products_by_clean_keyword(candidates, clean_keyword)
+
+    if not results and and_clauses:
+        logger.info("[MONGO] strict query returned 0 — retrying with in-stock scan")
+        all_instock = _mongo_get_instock_products()
+        results = _filter_products_by_clean_keyword(all_instock, clean_keyword)
+        logger.info(
+            f"[MONGO] full scan {len(all_instock)} in-stock → {len(results)} matched"
+        )
+    else:
+        logger.info(
+            f"[MONGO] {len(candidates)} candidates → {len(results)} matched after validation"
+        )
     return results
 
 
-def _mongo_get_all_instock_products(limit: int = 2000) -> list[dict]:
-    cursor = (
-        products_collection.find({"flags.inStock": True}, {"_id": 0, "raw": 1})
-        .sort("raw.ModifyDate", -1)
-        .limit(limit)
-    )
-    return [doc["raw"] for doc in cursor if doc.get("raw")]
+def _cache_api_search(clean_keyword: str, products: list[dict]) -> None:
+    """Persist JR API search results so MongoDB fallback returns the same products."""
+    if not clean_keyword or not products:
+        return
+    try:
+        search_cache_collection.update_one(
+            {"keyword": clean_keyword},
+            {
+                "$set": {
+                    "keyword": clean_keyword,
+                    "products": products,
+                    "count": len(products),
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+            upsert=True,
+        )
+        logger.info(f"[CACHE] saved {len(products)} product(s) for keyword={clean_keyword!r}")
+    except Exception as e:
+        logger.warning(f"[CACHE] failed to save search cache: {e}")
+
+
+def _load_cached_search(clean_keyword: str) -> list[dict]:
+    """Return cached JR API results for this keyword, if available."""
+    if not clean_keyword:
+        return []
+    try:
+        doc = search_cache_collection.find_one(
+            {"keyword": clean_keyword},
+            {"_id": 0, "products": 1},
+        )
+        products = (doc or {}).get("products") or []
+        if products:
+            logger.info(f"[CACHE] hit keyword={clean_keyword!r} → {len(products)} product(s)")
+        return products
+    except Exception as e:
+        logger.warning(f"[CACHE] failed to load search cache: {e}")
+        return []
+
+
+def _mongo_get_all_instock_products() -> list[dict]:
+    return _mongo_get_instock_products()
 
 
 def _color_field_matches(term: str, field_value: str) -> bool:
@@ -509,6 +895,162 @@ def _color_field_matches(term: str, field_value: str) -> bool:
     if term in value:
         return True
     return any(part.strip() == term for part in value.replace("&", " and ").split(" and "))
+
+
+def _shape_field_matches(term: str, shape_value: str) -> bool:
+    shape = (shape_value or "").lower().strip()
+    if not shape or not term:
+        return False
+    catalog = _SHAPE_ALIASES.get(term.lower(), term)
+    return shape == catalog.lower() or term.lower() == shape
+
+
+def _apply_attribute_post_filters(
+    products: list[dict],
+    attribute_filters: dict[str, set[str]],
+) -> list[dict]:
+    """Enforce all non-price attributes the user asked for (shape, size, material, etc.)."""
+    result = products
+
+    shape_terms = attribute_filters.get("shape") or set()
+    if shape_terms:
+        filtered = [
+            p for p in result
+            if any(_shape_field_matches(t, str(p.get("Shape") or "")) for t in shape_terms)
+        ]
+        if filtered:
+            logger.info(f"[SEARCH] shape filter: {len(result)} → {len(filtered)} (terms={shape_terms})")
+            result = filtered
+        else:
+            logger.warning(f"[SEARCH] shape filter removed all products (terms={shape_terms})")
+            return []
+
+    weight_terms = attribute_filters.get("weight_max") or set()
+    if weight_terms:
+        max_kg = max(weight_terms)
+        filtered = [
+            p for p in result
+            if 0 < float(p.get("Weight") or 0) <= max_kg
+        ]
+        if filtered:
+            logger.info(f"[SEARCH] weight filter: {len(result)} → {len(filtered)} (max={max_kg}kg)")
+            result = filtered
+        else:
+            logger.warning(f"[SEARCH] weight filter removed all products (max={max_kg}kg)")
+            return []
+
+    room_terms = attribute_filters.get("room") or set()
+    if room_terms:
+        filtered = [
+            p for p in result
+            if any(
+                term in str(p.get(field) or "").lower()
+                for term in room_terms
+                for field in ("Room", "MultiFilter")
+            )
+        ]
+        if filtered:
+            logger.info(f"[SEARCH] room filter: {len(result)} → {len(filtered)} (terms={room_terms})")
+            result = filtered
+        else:
+            logger.warning(f"[SEARCH] room filter removed all products (terms={room_terms})")
+            return []
+
+    for attr, fields in (
+        ("size", ("SizeInFT", "SizeInCM")),
+        ("material", ("Material", "MaterialDetails", "MaterialFamilies")),
+        ("construction", ("Construction",)),
+        ("pattern", ("Pattern", "Style", "StylePattern", "DecoreStyle")),
+    ):
+        terms = attribute_filters.get(attr) or set()
+        if not terms:
+            continue
+        filtered = []
+        for p in result:
+            matched = False
+            for term in terms:
+                if attr == "size":
+                    if any(
+                        re.search(_size_regex(term), str(p.get(field) or ""), re.IGNORECASE)
+                        for field in fields
+                    ):
+                        matched = True
+                        break
+                elif any(term in str(p.get(field) or "").lower() for field in fields):
+                    matched = True
+                    break
+            if matched:
+                filtered.append(p)
+        if filtered:
+            logger.info(f"[SEARCH] {attr} filter: {len(result)} → {len(filtered)} (terms={terms})")
+            result = filtered
+        else:
+            logger.warning(f"[SEARCH] {attr} filter removed all products (terms={terms})")
+            return []
+
+    return result
+
+
+def _apply_search_pipeline(
+    raw_results: list[dict],
+    *,
+    color_check_terms: set[str],
+    attribute_filters: dict[str, set],
+    price_filter: dict | None,
+    exclude_skus: set | None,
+) -> list[dict]:
+    """Shared post-processing pipeline — same filters for MongoDB and API results."""
+    unique_results = _dedupe_by_sku(raw_results)
+    logger.info(f"[SEARCH] after dedup: {len(unique_results)} unique products")
+
+    if color_check_terms:
+        _ALL_COLOR_FIELDS = ("GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood", "BasicColor")
+        gr_filtered = [
+            p for p in unique_results
+            if any(_color_field_matches(term, str(p.get("GrColor") or "")) for term in color_check_terms)
+        ]
+        if gr_filtered:
+            logger.info(
+                f"[SEARCH] GrColor filter: {len(unique_results)} → {len(gr_filtered)} "
+                f"(terms={color_check_terms})"
+            )
+            unique_results = gr_filtered
+        else:
+            all_color_filtered = [
+                p for p in unique_results
+                if any(
+                    _color_field_matches(term, str(p.get(field) or ""))
+                    for term in color_check_terms
+                    for field in _ALL_COLOR_FIELDS
+                )
+            ]
+            if all_color_filtered:
+                logger.info(
+                    f"[SEARCH] color fallback filter: {len(unique_results)} → {len(all_color_filtered)} "
+                    f"(terms={color_check_terms})"
+                )
+                unique_results = all_color_filtered
+
+    unique_results = _apply_attribute_post_filters(unique_results, attribute_filters)
+    if not unique_results:
+        return []
+
+    if price_filter:
+        before = len(unique_results)
+        unique_results = _apply_price_filter(unique_results, price_filter)
+        logger.info(
+            f"[SEARCH] price post-filter={price_filter} → "
+            f"{before} before, {len(unique_results)} after"
+        )
+
+    if exclude_skus:
+        upper_exclude = {s.upper() for s in exclude_skus if s}
+        unique_results = [
+            p for p in unique_results
+            if str(p.get("SKU", "")).upper() not in upper_exclude
+        ]
+
+    return unique_results
 
 # ---------------------------------------------------------------------------
 # JR API helpers
@@ -544,7 +1086,7 @@ async def jaipur_rugs_product_search(
     requested_currency: str = "",
     exclude_skus: set | None = None,
 ):
-    """Search products via JR external API (product-master-search)."""
+    """Search products — MongoDB primary (synced Product Master), API fallback."""
     try:
         keyword = (keyword or "").strip()
         requested_currency = (
@@ -553,132 +1095,73 @@ async def jaipur_rugs_product_search(
             else _extract_requested_currency_from_text(keyword)
         )
         logger.info(
-            f"[JR-API] search start — keyword={keyword!r} "
+            f"[SEARCH] start — keyword={keyword!r} "
             f"requested_currency={requested_currency!r} "
             f"country_code={country_code!r} client_ip={client_ip!r}"
         )
 
         # Extract price + clean keyword so JR API only gets text/size/color/style terms
-        price_filter, clean_keyword, color_check_terms = _normalise_keyword(keyword)
+        price_filter, clean_keyword, color_check_terms, attribute_filters = _normalise_keyword(keyword)
         logger.info(
-            f"[JR-API] normalised — clean_keyword={clean_keyword!r} "
-            f"price_filter={price_filter} color_check_terms={color_check_terms}"
+            f"[SEARCH] normalised — clean_keyword={clean_keyword!r} "
+            f"price_filter={price_filter} color_check_terms={color_check_terms} "
+            f"attribute_filters={attribute_filters}"
         )
 
         if not clean_keyword and not price_filter:
-            logger.warning("[JR-API] no searchable terms after normalisation")
+            logger.warning("[SEARCH] no searchable terms after normalisation")
             return {"error": "No products found."}
 
         raw_results: list[dict] = []
         search_source = ""
 
-        # Price-only query: no keyword terms remain after extraction.
-        # Use full catalogue so the price post-filter has data to work on.
         if not clean_keyword:
-            logger.info("[JR-API] price-only query — fetching full product catalogue")
+            logger.info("[SEARCH] price-only query — full in-stock catalogue from MongoDB")
             raw_results = _mongo_get_all_instock_products()
             search_source = "mongo-catalogue"
             if not raw_results:
                 from qlink_chatbot.utils.jr_api_client import get_all_products as _jr_all
                 raw_results = await _jr_all()
-                search_source = "api-catalogue"
+                search_source = "api-catalogue-fallback"
         else:
-            try:
-                raw_results = await _jr_search_products(clean_keyword)
-                search_source = "api-search"
-            except Exception as api_err:
-                logger.warning(f"[JR-API] search API failed, falling back to MongoDB: {api_err}")
-                raw_results = []
+            raw_results = _mongo_search_products(clean_keyword)
+            search_source = "mongo-search"
 
             if not raw_results:
-                raw_results = _mongo_search_products(clean_keyword)
-                search_source = "mongo-search" if raw_results else search_source
+                logger.info("[SEARCH] MongoDB empty — falling back to JR product-master-search API")
+                try:
+                    raw_results = await _jr_search_products(clean_keyword)
+                    search_source = "api-search-fallback"
+                except Exception as api_err:
+                    logger.warning(f"[SEARCH] API fallback failed: {api_err}")
 
-        logger.info(
-            f"[JR-API] raw results from {search_source}: {len(raw_results)}"
-        )
+        logger.info(f"[SEARCH] raw results from {search_source}: {len(raw_results)}")
 
         if not raw_results:
-            logger.warning(f"[JR-API] no results for clean_keyword={clean_keyword!r}")
+            logger.warning(f"[SEARCH] no results for clean_keyword={clean_keyword!r}")
             return {"error": "No products found."}
 
-        # Log color/pattern fields from first 3 raw products so we can verify catalog values
         for _i, _p in enumerate(raw_results[:3]):
             logger.info(
-                f"[JR-API] raw[{_i}] SKU={_p.get('SKU')!r} "
-                f"GrColor={_p.get('GrColor')!r} BrColor={_p.get('BrColor')!r} "
-                f"ColorFamily={_p.get('ColorFamily')!r} DisplayFilter={_p.get('DisplayFilter')!r} "
-                f"ColorMood={_p.get('ColorMood')!r} Pattern={_p.get('Pattern')!r} "
-                f"Style={_p.get('Style')!r} Construction={_p.get('Construction')!r} "
-                f"Material={_p.get('Material')!r} SizeInFT={_p.get('SizeInFT')!r}"
+                f"[SEARCH] raw[{_i}] SKU={_p.get('SKU')!r} Shape={_p.get('Shape')!r} "
+                f"GrColor={_p.get('GrColor')!r} ColorFamily={_p.get('ColorFamily')!r} "
+                f"SizeInFT={_p.get('SizeInFT')!r} Material={_p.get('Material')!r} "
+                f"Construction={_p.get('Construction')!r} Pattern={_p.get('Pattern')!r}"
             )
 
-        unique_results = _dedupe_by_sku(raw_results)
-        logger.info(f"[JR-API] after dedup: {len(unique_results)} unique products")
-
-        # Color relevance post-filter.
-        # Primary: match on GrColor (ground/base colour) — the main visible colour of the rug.
-        # Fallback: accept any colour field match so we never drop to zero results.
-        if color_check_terms:
-            _ALL_COLOR_FIELDS = ("GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood")
-            gr_filtered = [
-                p for p in unique_results
-                if any(_color_field_matches(term, str(p.get("GrColor") or "")) for term in color_check_terms)
-            ]
-            if gr_filtered:
-                logger.info(
-                    f"[JR-API] GrColor filter: {len(unique_results)} → {len(gr_filtered)} "
-                    f"(terms={color_check_terms})"
-                )
-                unique_results = gr_filtered
-            else:
-                all_color_filtered = [
-                    p for p in unique_results
-                    if any(
-                        _color_field_matches(term, str(p.get(field) or ""))
-                        for term in color_check_terms
-                        for field in _ALL_COLOR_FIELDS
-                    )
-                ]
-                if all_color_filtered:
-                    logger.info(
-                        f"[JR-API] color fallback filter: {len(unique_results)} → {len(all_color_filtered)} "
-                        f"(terms={color_check_terms})"
-                    )
-                    unique_results = all_color_filtered
-                else:
-                    logger.warning(
-                        f"[JR-API] color filter would remove all products — skipping "
-                        f"(terms={color_check_terms})"
-                    )
-
-        # Apply price post-filter
-        if price_filter:
-            before = len(unique_results)
-            unique_results = _apply_price_filter(unique_results, price_filter)
-            logger.info(
-                f"[JR-API] price post-filter={price_filter} → "
-                f"{before} before, {len(unique_results)} after"
-            )
-
+        unique_results = _apply_search_pipeline(
+            raw_results,
+            color_check_terms=color_check_terms,
+            attribute_filters=attribute_filters,
+            price_filter=price_filter,
+            exclude_skus=exclude_skus,
+        )
         if not unique_results:
-            logger.warning("[JR-API] 0 products after price filter")
+            logger.warning("[SEARCH] 0 products after filters")
             return {"error": "No products found."}
 
-        if exclude_skus:
-            upper_exclude = {s.upper() for s in exclude_skus if s}
-            before = len(unique_results)
-            unique_results = [
-                p for p in unique_results
-                if str(p.get("SKU", "")).upper() not in upper_exclude
-            ]
-            logger.info(
-                f"[JR-API] SKU exclusion: removed {before - len(unique_results)}, "
-                f"{len(unique_results)} remaining"
-            )
-
         selected = random.sample(unique_results, min(3, len(unique_results)))
-        logger.info(f"[JR-API] selected {len(selected)} product(s) for response")
+        logger.info(f"[SEARCH] selected {len(selected)} product(s) for response")
 
         # Resolve display currency
         currency = requested_currency or ""
@@ -759,10 +1242,10 @@ async def jaipur_rugs_product_search(
             }
             for i in formatted
         ]
-        logger.info(f"[JR-API] final payload: {final_log}")
-        logger.info(f"[JR-API] returning {len(formatted)} product(s) for keyword={keyword!r}")
+        logger.info(f"[SEARCH] final payload: {final_log}")
+        logger.info(f"[SEARCH] returning {len(formatted)} product(s) for keyword={keyword!r}")
         return formatted
 
     except Exception as e:
-        logger.error(f"[JR-API] unexpected error: {e}")
+        logger.error(f"[SEARCH] unexpected error: {e}")
         return {"error": f"Unexpected error: {str(e)}"}

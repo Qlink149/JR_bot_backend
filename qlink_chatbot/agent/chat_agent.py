@@ -15,7 +15,11 @@ from qlink_chatbot.database.mongo_utils import (
 )
 from qlink_chatbot.database.pinecone_utils import fetch_similar_sessions
 from qlink_chatbot.utils.agent_availability import get_agent_status
-from qlink_chatbot.utils.jaipur_rugs_api import jaipur_rugs_product_search, normalise_search_keyword
+from qlink_chatbot.utils.jaipur_rugs_api import (
+    jaipur_rugs_product_search,
+    normalise_search_keyword,
+    resolve_search_keyword,
+)
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
 
@@ -55,7 +59,7 @@ tools = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Search keyword sent to Jaipur Rugs product API. Use '&' to AND multiple terms (all must match) and '||' to OR alternatives (any can match). Examples: 'beige', 'beige&solid', 'wool&8x10', 'hand knotted&modern', 'beige&solid&above INR 50000', 'red||orange', 'red&8x10||blue&8x10'. Include price expressions like 'above INR 50000', 'under USD 1000', 'between INR 20000 and INR 80000' directly in the keyword — the system will extract and apply them as a filter."
+                    "description": "Search keyword sent to Jaipur Rugs product API. Use '&' to AND multiple attributes (all must match) and '||' to OR alternatives within one attribute. IMPORTANT: for multi-attribute queries use simple terms joined by & — e.g. 'blue&round', 'red&8x10', 'wool&hand knotted'. Do NOT expand colors with || when combining with other attributes. Supported attributes: color, shape (round/oval/square/runner/rectangle), size (8x10), material (wool/silk/jute), construction (hand knotted/hand tufted), style/pattern (modern/geometric/floral), price. Examples: 'beige', 'blue&round', 'red&8x10', 'wool&8x10', 'blue&oval&under INR 50000', 'red||orange' (color OR only). Include price expressions like 'above INR 50000' in the keyword."
                 },
                 "currency": {
                     "type": "string",
@@ -398,7 +402,13 @@ async def chat_agent(
                 logger.info(f"[AGENT-TOOL] session={session_id} tool={item.name} args={args}")
 
                 if item.name == "jaipur_rugs_product_search":
-                    keyword = args.get("keyword")
+                    keyword = resolve_search_keyword(args, user_message)
+                    keyword_sent_to_api = normalise_search_keyword(keyword)
+                    if not keyword:
+                        logger.warning(
+                            f"[AGENT-TOOL] jaipur_rugs_product_search missing keyword "
+                            f"— args={args!r} user_message={user_message!r}"
+                        )
                     products = await jaipur_rugs_product_search(
                         keyword,
                         client_ip=client_ip,
@@ -406,7 +416,11 @@ async def chat_agent(
                         requested_currency=args.get("currency", ""),
                     )
                     product_count = len(products) if isinstance(products, list) else 0
-                    logger.info(f"[AGENT-TOOL] jaipur_rugs_product_search keyword={keyword!r} → {product_count} product(s)")
+                    logger.info(
+                        f"[AGENT-TOOL] jaipur_rugs_product_search "
+                        f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r} "
+                        f"→ {product_count} product(s)"
+                    )
                     save_previous_search(
                         session_id,
                         keyword,
@@ -416,8 +430,9 @@ async def chat_agent(
                     if debug_collector is not None:
                         debug_collector.append({
                             "tool": "jaipur_rugs_product_search",
-                            "keyword": keyword,
-                            "keyword_sent_to_api": normalise_search_keyword(keyword),
+                            "keyword": keyword_sent_to_api,
+                            "keyword_raw": keyword,
+                            "keyword_sent_to_api": keyword_sent_to_api,
                             "currency": args.get("currency", ""),
                             "products_found": product_count,
                             "products": [
