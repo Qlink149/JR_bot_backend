@@ -231,7 +231,7 @@ async def chat_agent(
             model="gpt-4.1-mini",
             tools=tools,
             input=input_list,
-            temperature=0.7,
+            temperature=0.2,
             instructions=system_prompt,
             max_output_tokens=2048,
             text=output_schema,
@@ -316,6 +316,7 @@ async def chat_agent(
                 model="gpt-4.1-mini",
                 instructions=system_prompt,
                 input=input_list,
+                temperature=0.2,
                 text=output_schema
             )
 
