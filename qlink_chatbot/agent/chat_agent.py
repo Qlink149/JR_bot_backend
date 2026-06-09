@@ -227,8 +227,8 @@ async def chat_agent(
             {"role": "user", "content": user_message},
         ]
 
-        # Python-level store keyword guard: if the message is about stores/locations,
-        # inject a mandatory instruction so the LLM cannot skip the tool call.
+        # Python-level store guard: pre-fetch store data and inject into context so the
+        # LLM always has verified store data regardless of whether it calls the tool.
         _STORE_KEYWORDS = {
             "store", "stores", "showroom", "showrooms", "retail", "nearest store",
             "physical store", "visit", "in person", "see rugs", "where can i",
@@ -236,15 +236,20 @@ async def chat_agent(
         }
         _msg_lower = user_message.lower()
         if any(kw in _msg_lower for kw in _STORE_KEYWORDS):
-            logger.info(f"[AGENT] Store keyword detected in message — injecting mandatory tool hint")
-            input_list.append({
-                "role": "developer",
-                "content": (
-                    f"The user's message '{user_message}' is a store/location question. "
-                    "You MUST call search_store_locations NOW with query='all stores' before responding. "
-                    "Do not answer from memory. This is mandatory."
-                )
-            })
+            logger.info(f"[AGENT] Store keyword detected — pre-fetching store data")
+            try:
+                _store_result = search_store_locations(query="all stores")
+                _store_count = len(_store_result.get("stores", []))
+                logger.info(f"[AGENT] Pre-fetched {_store_count} store(s) — injecting into context")
+                input_list.append({
+                    "role": "developer",
+                    "content": (
+                        f"VERIFIED STORE DATA (already fetched — use this data directly, do NOT call search_store_locations again, do NOT answer from memory): "
+                        f"{json.dumps(_store_result)}"
+                    )
+                })
+            except Exception as _store_err:
+                logger.warning(f"[AGENT] Store pre-fetch failed: {_store_err}")
 
 
         # Step 1: Model processes with tools available

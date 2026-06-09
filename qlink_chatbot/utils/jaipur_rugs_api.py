@@ -1060,7 +1060,7 @@ async def jaipur_rugs_product_search(
                 "display_currency": currency,
                 "display_price": display_price,
                 "price_source_field": currency_field,
-                "name": raw.get("Name", ""),
+                "name": (raw.get("Name") or raw.get("ProductName") or raw.get("Title") or raw.get("product_name") or raw.get("Collection") or "").strip(),
                 "SKU": sku,
                 "collection": raw.get("Collection", ""),
                 "size": size.get("exact", raw.get("SizeInFT", "")),
