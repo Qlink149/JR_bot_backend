@@ -272,27 +272,95 @@ _NOISE_WORDS = {
 }
 
 
-# Color terms that JR API may not index directly → expand to OR alternatives
+# Maps user color/pattern words → exact JR API catalog values (GrColor, ColorFamily, DisplayFilter)
+# Using || so the API text-searches across all those field values simultaneously.
 _COLOR_ALIASES: dict[str, str] = {
-    "rust": "rust||terracotta||copper||red orange",
-    "terracotta": "terracotta||rust||copper||burnt orange",
-    "navy": "navy||dark blue||deep blue||navy blue",
-    "navy blue": "navy||dark blue||deep blue",
-    "multicolor": "multicolor||multi color||multi",
-    "multi": "multicolor||multi color||multi",
-    "off-white": "off white||cream||ivory||white",
-    "off white": "off white||cream||ivory||white",
-    "dark": "dark||charcoal||black||deep",
-    "olive": "olive||sage||moss green||green",
-    "sage": "sage||olive||mint||green",
-    "gold": "gold||golden||yellow gold||mustard",
-    "mustard": "mustard||gold||yellow",
+    # Reds / Oranges / Rusts
+    "red":          "Red||Crimson||Rust||Red and Orange",
+    "crimson":      "Crimson||Red||Red and Orange",
+    "rust":         "Rust||Copper||Copper Tan||Red and Orange",
+    "terracotta":   "Rust||Copper||Red and Orange",
+    "orange":       "Red and Orange||Copper||Rust",
+    "copper":       "Copper||Copper Tan||Rust||Red and Orange",
+    "maroon":       "Crimson||Red and Orange",
+    "burgundy":     "Crimson||Red and Orange",
+    # Blues
+    "blue":         "Blue and Green||Navy Blue",
+    "navy":         "Navy Blue||Blue and Green",
+    "navy blue":    "Navy Blue||Blue and Green",
+    "teal":         "Blue and Green",
+    "indigo":       "Navy Blue||Blue and Green",
+    # Greens
+    "green":        "Blue and Green",
+    "olive":        "Blue and Green",
+    "sage":         "Blue and Green",
+    "emerald":      "Blue and Green",
+    # Greys / Blacks
+    "grey":         "Classic Gray||Charcoal||Grey and Black",
+    "gray":         "Classic Gray||Charcoal||Grey and Black",
+    "charcoal":     "Charcoal||Classic Gray||Grey and Black",
+    "silver":       "Classic Gray||Grey and Black",
+    "black":        "Grey and Black||Charcoal",
+    "dark":         "Charcoal||Grey and Black||Navy Blue",
+    # Whites / Ivories / Creams
+    "white":        "White and Ivory||Ivory||Antique White",
+    "ivory":        "Ivory||Antique White||White and Ivory",
+    "cream":        "Ivory||Antique White||White and Ivory",
+    "off-white":    "Ivory||Antique White||White and Ivory",
+    "off white":    "Ivory||Antique White||White and Ivory",
+    # Beiges / Browns / Sands
+    "beige":        "Beige||Sand||Beige and Brown",
+    "sand":         "Sand||Beige||Beige and Brown",
+    "tan":          "Sand||Beige||Beige and Brown||Copper Tan",
+    "taupe":        "Beige||Sand||Beige and Brown",
+    "brown":        "Beige and Brown",
+    "chocolate":    "Beige and Brown",
+    # Golds / Yellows
+    "gold":         "Gold||Yellow and Gold",
+    "golden":       "Gold||Yellow and Gold",
+    "mustard":      "Gold||Yellow and Gold",
+    "yellow":       "Yellow and Gold",
+    # Pinks / Purples
+    "pink":         "Pink and Purple",
+    "blush":        "Pink and Purple",
+    "rose":         "Pink and Purple",
+    "purple":       "Pink and Purple",
+    "lavender":     "Pink and Purple",
+    "violet":       "Pink and Purple",
+    # Multi
+    "multicolor":   "Multi",
+    "multi":        "Multi",
+    "multi color":  "Multi",
+    "multicolour":  "Multi",
+    "colorful":     "Multi",
+}
+
+# Maps pattern/style user words → exact JR API catalog values
+_PATTERN_ALIASES: dict[str, str] = {
+    "solid":        "Solid",
+    "plain":        "Solid",
+    "geometric":    "Geometric",
+    "geo":          "Geometric",
+    "floral":       "Floral",
+    "abstract":     "Abstract",
+    "tribal":       "Moroccan and Tribal",
+    "moroccan":     "Moroccan and Tribal",
+    "boho":         "Moroccan and Tribal",
+    "bohemian":     "Moroccan and Tribal",
+    "medallion":    "Medallion",
+    "modern":       "Modern",
+    "contemporary": "Contemporary",
+    "traditional":  "Traditional",
+    "classic":      "Traditional",
+    "transitional": "Transitional",
+    "vintage":      "Traditional",
 }
 
 
-def _expand_color_aliases(segment: str) -> str:
-    """Replace single color terms with OR-expanded alternatives for better JR API coverage."""
-    return _COLOR_ALIASES.get(segment.strip().lower(), segment)
+def _expand_term(segment: str) -> str:
+    """Expand a single keyword segment using color or pattern catalog aliases."""
+    key = segment.strip().lower()
+    return _COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or segment
 
 
 def _normalise_keyword(keyword: str) -> tuple[dict | None, str]:
@@ -323,7 +391,7 @@ def _normalise_keyword(keyword: str) -> tuple[dict | None, str]:
         segment = " ".join(words).strip()
 
         if segment:
-            clean_segments.append(_expand_color_aliases(segment))
+            clean_segments.append(_expand_term(segment))
 
     clean_keyword = "&".join(clean_segments)
     return overall_price_filter, clean_keyword
@@ -397,6 +465,17 @@ async def jaipur_rugs_product_search(
             logger.warning(f"[JR-API] no results for clean_keyword={clean_keyword!r}")
             return {"error": "No products found."}
 
+        # Log color/pattern fields from first 3 raw products so we can verify catalog values
+        for _i, _p in enumerate(raw_results[:3]):
+            logger.info(
+                f"[JR-API] raw[{_i}] SKU={_p.get('SKU')!r} "
+                f"GrColor={_p.get('GrColor')!r} BrColor={_p.get('BrColor')!r} "
+                f"ColorFamily={_p.get('ColorFamily')!r} DisplayFilter={_p.get('DisplayFilter')!r} "
+                f"ColorMood={_p.get('ColorMood')!r} Pattern={_p.get('Pattern')!r} "
+                f"Style={_p.get('Style')!r} Construction={_p.get('Construction')!r} "
+                f"Material={_p.get('Material')!r} SizeInFT={_p.get('SizeInFT')!r}"
+            )
+
         unique_results = _dedupe_by_sku(raw_results)
         logger.info(f"[JR-API] after dedup: {len(unique_results)} unique products")
 
@@ -461,7 +540,11 @@ async def jaipur_rugs_product_search(
                 "size": p.get("SizeInFT", ""),
                 "shape": p.get("Shape", ""),
                 "color": p.get("GrColor", ""),
+                "border_color": p.get("BrColor", ""),
                 "color_family": p.get("ColorFamily", ""),
+                "display_filter": p.get("DisplayFilter", ""),
+                "color_mood": p.get("ColorMood", ""),
+                "pattern": p.get("Pattern", ""),
                 "matched_color_percentage": {
                     "total": 0,
                     "by_color": {},
@@ -488,10 +571,22 @@ async def jaipur_rugs_product_search(
             })
 
         final_log = [
-            {"SKU": i["SKU"], "name": i["name"], "display_price": i["display_price"]}
+            {
+                "SKU": i["SKU"],
+                "name": i["name"],
+                "display_price": i["display_price"],
+                "GrColor": i["color"],
+                "BrColor": i["border_color"],
+                "ColorFamily": i["color_family"],
+                "DisplayFilter": i["display_filter"],
+                "ColorMood": i["color_mood"],
+                "Pattern": i["pattern"],
+                "Style": i["style"],
+                "size": i["size"],
+            }
             for i in formatted
         ]
-        logger.info(f"[JR-API] final payload (SKU + price): {final_log}")
+        logger.info(f"[JR-API] final payload: {final_log}")
         logger.info(f"[JR-API] returning {len(formatted)} product(s) for keyword={keyword!r}")
         return formatted
 
