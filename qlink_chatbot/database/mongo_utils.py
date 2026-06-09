@@ -15,7 +15,7 @@ client = MongoClient(
     MONGO_URI,
     serverSelectionTimeoutMS=5000,
     connectTimeoutMS=5000,
-    socketTimeoutMS=15000,
+    socketTimeoutMS=30000,
 )
 db = client["JR"]
 sessions_collection = db["users"]

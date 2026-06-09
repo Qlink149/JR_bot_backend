@@ -191,6 +191,13 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
             expansion = COLOR_ALIASES[key]
             if "||" not in expansion:
                 color_check_terms.add(expansion.lower())
+            else:
+                for part in expansion.split("||"):
+                    part_lower = part.strip().lower()
+                    # Avoid pink synonyms that false-match names like "Tea Rose".
+                    if key == "pink" and part_lower in {"rose", "mauve", "coral", "blush"}:
+                        continue
+                    color_check_terms.add(part_lower)
         elif "||" in segment:
             for part in segment.split("||"):
                 part_key = part.strip().lower()
