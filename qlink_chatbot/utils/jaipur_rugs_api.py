@@ -371,15 +371,18 @@ def _expand_term(segment: str) -> str:
     return _COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or segment
 
 
-def _normalise_keyword(keyword: str) -> tuple[dict | None, str]:
+def _normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str]]:
     """
     1. Extract price filter (won't be understood by JR API).
     2. Normalise size tokens (8 x 10 → 8x10, 8 by 10 → 8x10).
     3. Drop generic noise words from each segment.
-    Returns (price_filter, clean_keyword_for_jr_api).
+    Returns (price_filter, clean_keyword_for_jr_api, color_check_terms).
+    color_check_terms: lowercase OR alternatives from color alias expansions, used for
+    post-result relevance filtering.
     """
     overall_price_filter = None
     clean_segments = []
+    color_check_terms: set[str] = set()
 
     for segment in keyword.split("&"):
         segment = segment.strip().lower()
@@ -398,11 +401,35 @@ def _normalise_keyword(keyword: str) -> tuple[dict | None, str]:
         words = [w for w in segment.split() if w.lower() not in _NOISE_WORDS]
         segment = " ".join(words).strip()
 
-        if segment:
-            clean_segments.append(_expand_term(segment))
+        if not segment:
+            continue
+
+        expanded = _expand_term(segment)
+        clean_segments.append(expanded)
+
+        # Track color terms from alias expansions for post-result filtering.
+        # Only COLOR aliases qualify (not pattern aliases, not raw unmatched terms).
+        key = segment.strip().lower()
+        if key in _COLOR_ALIASES:
+            for part in expanded.split("||"):
+                color_check_terms.add(part.strip().lower())
+        elif "||" in segment:
+            # Handle pre-expanded OR segments: check each part individually
+            for part in segment.split("||"):
+                part_key = part.strip().lower()
+                if part_key in _COLOR_ALIASES:
+                    part_exp = _COLOR_ALIASES[part_key]
+                    for term in part_exp.split("||"):
+                        color_check_terms.add(term.strip().lower())
 
     clean_keyword = "&".join(clean_segments)
-    return overall_price_filter, clean_keyword
+    return overall_price_filter, clean_keyword, color_check_terms
+
+
+def normalise_search_keyword(keyword: str) -> str:
+    """Return the cleaned/expanded keyword that will be sent to the JR API."""
+    _, clean, _ = _normalise_keyword(keyword)
+    return clean
 
 # ---------------------------------------------------------------------------
 # JR API helpers
@@ -452,10 +479,10 @@ async def jaipur_rugs_product_search(
         )
 
         # Extract price + clean keyword so JR API only gets text/size/color/style terms
-        price_filter, clean_keyword = _normalise_keyword(keyword)
+        price_filter, clean_keyword, color_check_terms = _normalise_keyword(keyword)
         logger.info(
             f"[JR-API] normalised — clean_keyword={clean_keyword!r} "
-            f"price_filter={price_filter}"
+            f"price_filter={price_filter} color_check_terms={color_check_terms}"
         )
 
         # Price-only query: no keyword terms remain after extraction.
@@ -486,6 +513,31 @@ async def jaipur_rugs_product_search(
 
         unique_results = _dedupe_by_sku(raw_results)
         logger.info(f"[JR-API] after dedup: {len(unique_results)} unique products")
+
+        # Color relevance post-filter: JR API text-searches across all fields (name, URL, etc.)
+        # so non-color products can sneak in. Keep only products where at least one color
+        # field (GrColor, BrColor, ColorFamily, DisplayFilter) contains a requested color term.
+        if color_check_terms:
+            _COLOR_FIELDS = ("GrColor", "BrColor", "ColorFamily", "DisplayFilter")
+            color_filtered = [
+                p for p in unique_results
+                if any(
+                    term in str(p.get(field) or "").lower()
+                    for term in color_check_terms
+                    for field in _COLOR_FIELDS
+                )
+            ]
+            if color_filtered:
+                logger.info(
+                    f"[JR-API] color relevance filter: {len(unique_results)} → {len(color_filtered)} "
+                    f"(terms={color_check_terms})"
+                )
+                unique_results = color_filtered
+            else:
+                logger.warning(
+                    f"[JR-API] color relevance filter would remove all products — skipping "
+                    f"(terms={color_check_terms})"
+                )
 
         # Apply price post-filter
         if price_filter:

@@ -15,7 +15,7 @@ from qlink_chatbot.database.mongo_utils import (
 )
 from qlink_chatbot.database.pinecone_utils import fetch_similar_sessions
 from qlink_chatbot.utils.agent_availability import get_agent_status
-from qlink_chatbot.utils.jaipur_rugs_api import jaipur_rugs_product_search
+from qlink_chatbot.utils.jaipur_rugs_api import jaipur_rugs_product_search, normalise_search_keyword
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
 
@@ -416,13 +416,20 @@ async def chat_agent(
                     if debug_collector is not None:
                         debug_collector.append({
                             "tool": "jaipur_rugs_product_search",
-                            "keyword": keyword,
+                            "keyword_raw": keyword,
+                            "keyword_sent_to_api": normalise_search_keyword(keyword),
                             "currency": args.get("currency", ""),
                             "products_found": product_count,
                             "products": [
                                 {
                                     "name": p.get("name", ""),
                                     "SKU": p.get("SKU", ""),
+                                    "GrColor": p.get("color", ""),
+                                    "BrColor": p.get("border_color", ""),
+                                    "ColorFamily": p.get("color_family", ""),
+                                    "DisplayFilter": p.get("display_filter", ""),
+                                    "ColorMood": p.get("color_mood", ""),
+                                    "Pattern": p.get("pattern", ""),
                                     "size": p.get("size", ""),
                                     "material": p.get("material", ""),
                                     "display_price": p.get("display_price", ""),
