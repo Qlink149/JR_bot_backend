@@ -416,7 +416,7 @@ async def chat_agent(
                     if debug_collector is not None:
                         debug_collector.append({
                             "tool": "jaipur_rugs_product_search",
-                            "keyword_raw": keyword,
+                            "keyword": keyword,
                             "keyword_sent_to_api": normalise_search_keyword(keyword),
                             "currency": args.get("currency", ""),
                             "products_found": product_count,
