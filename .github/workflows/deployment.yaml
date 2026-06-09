@@ -90,7 +90,7 @@ jobs:
               -e PINECONE_API="${{ secrets.PINECONE_API }}" \
               -e R2_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY }}" \
               -e R2_SECRET_KEY="${{ secrets.R2_SECRET_KEY }}" \
-              -e APP_CORS_ENABLED="true" \
+              -e BEHIND_PROXY_CORS="true" \
               -e WHAPI_TOKEN="${{ secrets.WHAPI_TOKEN }}" \
               -e WEBHOOK_API="${{ secrets.WEBHOOK_API }}" \
               -e QLINK_GUPSHUP_APP_ID="${{ secrets.QLINK_GUPSHUP_APP_ID }}" \

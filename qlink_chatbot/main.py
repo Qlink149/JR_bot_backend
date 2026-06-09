@@ -39,16 +39,23 @@ def get_cors_origins() -> list[str]:
     # Keep production frontend origins available even if Vercel env values
     # are incomplete or missing during a deployment.
     raw = os.getenv("CORS_ORIGINS", "")
-    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    origins = [
+        origin.strip()
+        for origin in raw.split(",")
+        if origin.strip() and origin.strip() != "*"
+    ]
 
     for default_origin in DEFAULT_CORS_ORIGINS:
         if default_origin not in origins:
             origins.append(default_origin)
 
-    return origins or ["*"]
+    return origins
 
 
 def is_app_cors_enabled() -> bool:
+    """App-level CORS is for local/dev only. Production Vultr nginx already sets CORS."""
+    if os.getenv("BEHIND_PROXY_CORS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
     return os.getenv("APP_CORS_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -72,6 +79,9 @@ if is_app_cors_enabled():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    logger.info("[CORS] FastAPI CORSMiddleware enabled for %s", get_cors_origins())
+else:
+    logger.info("[CORS] FastAPI CORSMiddleware disabled (proxy/nginx handles CORS)")
 
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
