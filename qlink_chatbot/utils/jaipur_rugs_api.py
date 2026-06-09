@@ -743,6 +743,46 @@ def _run_query(query: dict, limit: int = 200) -> list:
     return list(products_collection.find(query, {"_id": 0}).limit(limit))
 
 
+def _apply_price_filter(products: list, price_filter: dict) -> list:
+    """Post-filter by price in Python — handles string/number type inconsistencies in MongoDB."""
+    if not price_filter:
+        return products
+
+    currency = price_filter.get("currency", "INR")
+    currency_field = CURRENCY_FIELDS.get(currency, "INR_MRP")
+
+    result = []
+    for p in products:
+        raw = p.get("raw", {})
+        search = p.get("search", {})
+        raw_price = search.get("price") if currency == "INR" else raw.get(currency_field)
+        try:
+            price = float(str(raw_price).replace(",", "")) if raw_price not in (None, "", "0") else 0.0
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+
+        if "min_amount" in price_filter and price < price_filter["min_amount"]:
+            continue
+        if "max_amount" in price_filter and price > price_filter["max_amount"]:
+            continue
+        if "amount" in price_filter:
+            amount = price_filter["amount"]
+            op = price_filter.get("operator", "$lte")
+            if op == "$lte" and price > amount:
+                continue
+            if op == "$gte" and price < amount:
+                continue
+            if op == "$lt" and price >= amount:
+                continue
+            if op == "$gt" and price <= amount:
+                continue
+
+        result.append(p)
+    return result
+
+
 def _apply_weight_filter(products: list, weight_filter: float) -> list:
     """Post-filter by weight ceiling (handles string/float stored values)."""
     result = []
@@ -915,6 +955,10 @@ async def jaipur_rugs_product_search(
 
         if not results:
             return {"error": "No products found."}
+
+        # Price is post-filtered in Python to handle string/number type inconsistencies in DB
+        if price_filter:
+            results = _apply_price_filter(results, price_filter)
 
         # Weight is post-filtered in Python (may be stored as string in DB)
         if weight_filter is not None:
