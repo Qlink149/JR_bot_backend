@@ -276,57 +276,57 @@ _NOISE_WORDS = {
 # Using || so the API text-searches across all those field values simultaneously.
 _COLOR_ALIASES: dict[str, str] = {
     # Reds / Oranges / Rusts
-    "red":          "Red||Crimson||Rust||Red and Orange",
-    "crimson":      "Crimson||Red||Red and Orange",
-    "rust":         "Rust||Copper||Copper Tan||Red and Orange",
-    "terracotta":   "Rust||Copper||Red and Orange",
-    "orange":       "Red and Orange||Copper||Rust",
-    "copper":       "Copper||Copper Tan||Rust||Red and Orange",
-    "maroon":       "Crimson||Red and Orange",
-    "burgundy":     "Crimson||Red and Orange",
+    "red":          "Red||Crimson||Rust||Scarlet||Maroon",
+    "crimson":      "Crimson||Red||Scarlet",
+    "rust":         "Rust||Copper||Copper Tan||Terracotta",
+    "terracotta":   "Terracotta||Rust||Copper||Burnt Orange",
+    "orange":       "Orange||Copper||Rust||Amber",
+    "copper":       "Copper||Copper Tan||Rust",
+    "maroon":       "Maroon||Crimson||Red",
+    "burgundy":     "Burgundy||Crimson||Maroon",
     # Blues
-    "blue":         "Blue and Green||Navy Blue",
-    "navy":         "Navy Blue||Blue and Green",
-    "navy blue":    "Navy Blue||Blue and Green",
-    "teal":         "Blue and Green",
-    "indigo":       "Navy Blue||Blue and Green",
+    "blue":         "Blue||Navy||Teal",
+    "navy":         "Navy||Blue||Indigo",
+    "navy blue":    "Navy||Blue",
+    "teal":         "Teal||Blue||Turquoise",
+    "indigo":       "Indigo||Navy||Blue",
     # Greens
-    "green":        "Blue and Green",
-    "olive":        "Blue and Green",
-    "sage":         "Blue and Green",
-    "emerald":      "Blue and Green",
+    "green":        "Green||Olive||Sage||Jade",
+    "olive":        "Green||Olive||Sage||Moss",
+    "sage":         "Green||Sage||Olive||Mint",
+    "emerald":      "Green||Emerald||Jade",
     # Greys / Blacks
-    "grey":         "Classic Gray||Charcoal||Grey and Black",
-    "gray":         "Classic Gray||Charcoal||Grey and Black",
-    "charcoal":     "Charcoal||Classic Gray||Grey and Black",
-    "silver":       "Classic Gray||Grey and Black",
-    "black":        "Grey and Black||Charcoal",
-    "dark":         "Charcoal||Grey and Black||Navy Blue",
+    "grey":         "Classic Gray||Charcoal||Slate||Gray",
+    "gray":         "Classic Gray||Charcoal||Slate||Gray",
+    "charcoal":     "Charcoal||Classic Gray||Slate",
+    "silver":       "Classic Gray||Silver||Gray",
+    "black":        "Black||Charcoal||Ebony",
+    "dark":         "Charcoal||Dark||Black||Navy Blue",
     # Whites / Ivories / Creams
-    "white":        "White and Ivory||Ivory||Antique White",
-    "ivory":        "Ivory||Antique White||White and Ivory",
-    "cream":        "Ivory||Antique White||White and Ivory",
-    "off-white":    "Ivory||Antique White||White and Ivory",
-    "off white":    "Ivory||Antique White||White and Ivory",
+    "white":        "White||Ivory||Antique White||Cream",
+    "ivory":        "Ivory||Antique White||Cream||White",
+    "cream":        "Cream||Ivory||Antique White||White",
+    "off-white":    "Ivory||Antique White||Cream||White",
+    "off white":    "Ivory||Antique White||Cream||White",
     # Beiges / Browns / Sands
-    "beige":        "Beige||Sand||Beige and Brown",
-    "sand":         "Sand||Beige||Beige and Brown",
-    "tan":          "Sand||Beige||Beige and Brown||Copper Tan",
-    "taupe":        "Beige||Sand||Beige and Brown",
-    "brown":        "Beige and Brown",
-    "chocolate":    "Beige and Brown",
+    "beige":        "Beige||Sand||Camel||Tan",
+    "sand":         "Sand||Beige||Camel||Tan",
+    "tan":          "Tan||Sand||Camel||Copper Tan",
+    "taupe":        "Taupe||Beige||Sand",
+    "brown":        "Brown||Chocolate||Walnut||Caramel",
+    "chocolate":    "Chocolate||Brown||Walnut",
     # Golds / Yellows
-    "gold":         "Gold||Yellow and Gold",
-    "golden":       "Gold||Yellow and Gold",
-    "mustard":      "Gold||Yellow and Gold",
-    "yellow":       "Yellow and Gold",
+    "gold":         "Gold||Golden||Mustard||Amber",
+    "golden":       "Golden||Gold||Amber",
+    "mustard":      "Mustard||Gold||Yellow",
+    "yellow":       "Yellow||Mustard||Gold",
     # Pinks / Purples
-    "pink":         "Pink and Purple",
-    "blush":        "Pink and Purple",
-    "rose":         "Pink and Purple",
-    "purple":       "Pink and Purple",
-    "lavender":     "Pink and Purple",
-    "violet":       "Pink and Purple",
+    "pink":         "Pink||Blush||Rose||Mauve",
+    "blush":        "Blush||Pink||Rose",
+    "rose":         "Rose||Pink||Blush",
+    "purple":       "Purple||Lavender||Violet||Plum",
+    "lavender":     "Lavender||Purple||Lilac",
+    "violet":       "Violet||Purple||Lavender",
     # Multi
     "multicolor":   "Multi",
     "multi":        "Multi",
@@ -358,7 +358,15 @@ _PATTERN_ALIASES: dict[str, str] = {
 
 
 def _expand_term(segment: str) -> str:
-    """Expand a single keyword segment using color or pattern catalog aliases."""
+    """Expand a keyword segment using color/pattern aliases.
+    Handles segments that already contain || by expanding each OR part individually.
+    """
+    if "||" in segment:
+        expanded = []
+        for part in segment.split("||"):
+            key = part.strip().lower()
+            expanded.append(_COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or part.strip())
+        return "||".join(expanded)
     key = segment.strip().lower()
     return _COLOR_ALIASES.get(key) or _PATTERN_ALIASES.get(key) or segment
 

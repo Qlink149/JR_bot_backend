@@ -277,11 +277,12 @@ async def chat_agent(
     collection_name: str = "users",
     detected_currency: str = "",
     debug_collector: list = None,
+    image_url: str = "",
 ):
     """Main Jaipur Rugs chatbot agent."""
     response = None
     try:
-        logger.info(f"[AGENT-IN] session={session_id} collection={collection_name} currency={detected_currency} msg={user_message!r}")
+        logger.info(f"[AGENT-IN] session={session_id} collection={collection_name} currency={detected_currency} image={'yes' if image_url else 'no'} msg={user_message!r}")
 
         if _is_store_query(user_message, chat_history):
             store_query = _store_query_from_message(user_message)
@@ -338,7 +339,17 @@ async def chat_agent(
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
             {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search`; do not recalculate, convert, or pick another MRP value. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
             {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, or any non-product response."},
-            {"role": "user", "content": user_message},
+            {
+                "role": "user",
+                "content": (
+                    [
+                        {"type": "input_image", "image_url": image_url},
+                        {"type": "input_text", "text": user_message or "What do you see in this image?"},
+                    ]
+                    if image_url
+                    else user_message
+                ),
+            },
         ]
 
         # Python-level store guard: pre-fetch store data and inject into context so the

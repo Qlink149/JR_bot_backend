@@ -98,9 +98,10 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
             if msg.get("from") != "user":
                 continue
 
+            image_url = msg.get("image_url") or msg.get("image") or msg.get("imageUrl") or msg.get("attachment_url") or ""
             message = {
                 "type": "message",
-                "from": "user", 
+                "from": "user",
                 "content": msg.get("content")
             }
             save_message(session_id, "user", message["content"])
@@ -115,9 +116,9 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     await a.send_json(message)
                     await a.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 await websocket.send_json({"type": "typing", "from": "assistant", "is_typing": True})
-                
+
                 detected_currency = currency_for_country(resolved_country) or geo.get("currency", "INR")
-                logger.info(f"[WEB-IN] session={session_id} country={resolved_country} currency={detected_currency} msg={message['content']!r}")
+                logger.info(f"[WEB-IN] session={session_id} country={resolved_country} currency={detected_currency} image={'yes' if image_url else 'no'} msg={message['content']!r}")
                 debug_tool_calls = []
                 response = await chat_agent(
                     chat_history=session.get("chat_history", []),
@@ -127,6 +128,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     client_ip=client_ip,
                     detected_currency=detected_currency,
                     debug_collector=debug_tool_calls,
+                    image_url=image_url,
                 )
                 logger.info(f"[WEB-OUT] session={session_id} reply={response!r}")
 
