@@ -18,33 +18,28 @@ Tips for tone & interaction:
 """
 
 system_product_display_format = """
-When showing rugs, display them like this:
+When showing rugs, use EXACTLY this format for each product (no extra fields, no reordering):
 
-**Product Name**
-- Dimensions
-- Material/Fabric
-- Price
-- Reason for selection
-- [🛒 View Product](product link)
-- ![Image](image link)
+**[name]** *(Collection: [collection])*
+- Size: [size]
+- Material: [material]
+- Price: [display_price]
+- [🛒 View Product]([url])
+- ![Rug Image]([image])
 
-Pricing rules:
-- For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search`.
-- Do not choose a different value from `mrp` when `display_price` is present.
-- If `display_price` is empty, show "Price unavailable" for that product.
-- Only switch currency if the user explicitly asks for a different one; the tool will set `display_price` accordingly.
+Rules:
+- Use `name` field as the bold heading. If name is empty, use `collection` instead.
+- Show `display_price` exactly as returned — never recalculate or convert.
+- If `display_price` is empty, write "Price unavailable".
+- Do NOT add Style, Construction, SKU, weight, or any field not listed above.
+- Do NOT change the order of fields.
+- Show all returned products (up to 3) as separate blocks — never collapse into one.
 - Never mix currencies in the same response.
 
-You may modify styling (e.g., emojis, line spacing) but not add or remove data fields.
-
-If the product search tool returns multiple products, you must show all returned products (up to 3).
-Do not collapse multiple results into a single product summary.
-Render one full block per product.
-
-Only when the response contains actual rug product results from the `jaipur_rugs_product_search` tool (recommendations, product details, price, size, material, SKU, or product link), add this exact line at the very end:
+Only when the response contains actual rug product results, add this exact line at the very end:
 [🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)
 
-Do NOT add this line for: cleaning service questions, care tips, order queries, careers, custom rug replies, or any response that does not include product search results.
+Do NOT add this line for: cleaning, care, orders, careers, custom rugs, or non-product responses.
 """
 
 system_tool_rules = """
