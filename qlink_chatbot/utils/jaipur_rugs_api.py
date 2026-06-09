@@ -321,12 +321,16 @@ _COLOR_ALIASES: dict[str, str] = {
     "mustard":      "Mustard||Gold||Yellow",
     "yellow":       "Yellow||Mustard||Gold",
     # Pinks / Purples
-    "pink":         "Pink||Blush||Rose||Mauve",
-    "blush":        "Blush||Pink||Rose",
-    "rose":         "Rose||Pink||Blush",
-    "purple":       "Purple||Lavender||Violet||Plum",
-    "lavender":     "Lavender||Purple||Lilac",
+    "pink":         "Pink||Blush||Rose||Mauve||Coral Essence||Hot Pink||Fuchsia||Dusty Rose||Salmon||Flamingo||Petal||Bubblegum",
+    "blush":        "Blush||Pink||Rose||Dusty Rose",
+    "rose":         "Rose||Pink||Blush||Dusty Rose",
+    "coral":        "Coral||Coral Essence||Terracotta||Rust",
+    "mauve":        "Mauve||Blush||Pink||Dusty Rose",
+    "fuchsia":      "Fuchsia||Hot Pink||Pink",
+    "purple":       "Purple||Lavender||Violet||Plum||Wisteria",
+    "lavender":     "Lavender||Purple||Lilac||Wisteria",
     "violet":       "Violet||Purple||Lavender",
+    "wisteria":     "Wisteria||Lavender||Purple",
     # Multi
     "multicolor":   "Multi",
     "multi":        "Multi",
@@ -380,6 +384,7 @@ def _normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str]]:
     color_check_terms: lowercase OR alternatives from color alias expansions, used for
     post-result relevance filtering.
     """
+    keyword = (keyword or "").strip()
     overall_price_filter = None
     clean_segments = []
     color_check_terms: set[str] = set()
@@ -431,6 +436,81 @@ def normalise_search_keyword(keyword: str) -> str:
     _, clean, _ = _normalise_keyword(keyword)
     return clean
 
+
+def resolve_search_keyword(args: dict | None, user_message: str = "") -> str:
+    """Resolve keyword from tool args, tolerating alternate arg names from the model."""
+    for key in ("keyword", "query", "search", "search_keyword", "keywords"):
+        value = (args or {}).get(key)
+        if value and str(value).strip():
+            return str(value).strip()
+    return (user_message or "").strip()
+
+# ---------------------------------------------------------------------------
+# MongoDB product search (same catalogue synced from JR API)
+# ---------------------------------------------------------------------------
+
+_MONGO_SEARCH_FIELDS = (
+    "raw.GrColor", "raw.BrColor", "raw.ColorFamily", "raw.DisplayFilter",
+    "raw.ColorMood", "raw.Pattern", "raw.Style", "raw.Material",
+    "raw.MaterialDetails", "raw.Construction", "raw.SizeInFT",
+    "raw.Name", "raw.Collection", "raw.Design", "raw.FullDescription",
+)
+
+
+def _segment_to_mongo_clause(segment: str) -> dict:
+    parts = [p.strip() for p in segment.split("||") if p.strip()]
+    if not parts:
+        return {}
+    or_clauses = []
+    for part in parts:
+        pattern = re.escape(part)
+        for field in _MONGO_SEARCH_FIELDS:
+            or_clauses.append({field: {"$regex": pattern, "$options": "i"}})
+    return {"$or": or_clauses} if or_clauses else {}
+
+
+def _mongo_search_products(clean_keyword: str, limit: int = 500) -> list[dict]:
+    """Search synced MongoDB products using the same normalised keyword as the JR API."""
+    if not clean_keyword:
+        return []
+
+    segments = [s.strip() for s in clean_keyword.split("&") if s.strip()]
+    and_clauses = [clause for seg in segments if (clause := _segment_to_mongo_clause(seg))]
+    query: dict = {"flags.inStock": True}
+    if and_clauses:
+        query["$and"] = and_clauses
+
+    cursor = (
+        products_collection.find(query, {"_id": 0, "raw": 1})
+        .sort("raw.ModifyDate", -1)
+        .limit(limit)
+    )
+    results = []
+    for doc in cursor:
+        raw = doc.get("raw")
+        if raw:
+            results.append(raw)
+    return results
+
+
+def _mongo_get_all_instock_products(limit: int = 2000) -> list[dict]:
+    cursor = (
+        products_collection.find({"flags.inStock": True}, {"_id": 0, "raw": 1})
+        .sort("raw.ModifyDate", -1)
+        .limit(limit)
+    )
+    return [doc["raw"] for doc in cursor if doc.get("raw")]
+
+
+def _color_field_matches(term: str, field_value: str) -> bool:
+    """Match catalog color values including compound families like 'Pink and Purple'."""
+    value = (field_value or "").lower().strip()
+    if not value or not term:
+        return False
+    if term in value:
+        return True
+    return any(part.strip() == term for part in value.replace("&", " and ").split(" and "))
+
 # ---------------------------------------------------------------------------
 # JR API helpers
 # ---------------------------------------------------------------------------
@@ -467,6 +547,7 @@ async def jaipur_rugs_product_search(
 ):
     """Search products via JR external API (product-master-search)."""
     try:
+        keyword = (keyword or "").strip()
         requested_currency = (
             _normalize_currency_code(requested_currency)
             if requested_currency
@@ -485,16 +566,38 @@ async def jaipur_rugs_product_search(
             f"price_filter={price_filter} color_check_terms={color_check_terms}"
         )
 
+        if not clean_keyword and not price_filter:
+            logger.warning("[JR-API] no searchable terms after normalisation")
+            return {"error": "No products found."}
+
+        raw_results: list[dict] = []
+        search_source = ""
+
         # Price-only query: no keyword terms remain after extraction.
-        # Use product-master (full catalogue) so the price post-filter has data to work on.
+        # Use full catalogue so the price post-filter has data to work on.
         if not clean_keyword:
             logger.info("[JR-API] price-only query — fetching full product catalogue")
-            from qlink_chatbot.utils.jr_api_client import get_all_products as _jr_all
-            raw_results = await _jr_all()
+            raw_results = _mongo_get_all_instock_products()
+            search_source = "mongo-catalogue"
+            if not raw_results:
+                from qlink_chatbot.utils.jr_api_client import get_all_products as _jr_all
+                raw_results = await _jr_all()
+                search_source = "api-catalogue"
         else:
-            raw_results = await _jr_search_products(clean_keyword)
+            try:
+                raw_results = await _jr_search_products(clean_keyword)
+                search_source = "api-search"
+            except Exception as api_err:
+                logger.warning(f"[JR-API] search API failed, falling back to MongoDB: {api_err}")
+                raw_results = []
 
-        logger.info(f"[JR-API] raw results from JR API: {len(raw_results)}")
+            if not raw_results:
+                raw_results = _mongo_search_products(clean_keyword)
+                search_source = "mongo-search" if raw_results else search_source
+
+        logger.info(
+            f"[JR-API] raw results from {search_source}: {len(raw_results)}"
+        )
 
         if not raw_results:
             logger.warning(f"[JR-API] no results for clean_keyword={clean_keyword!r}")
@@ -514,30 +617,41 @@ async def jaipur_rugs_product_search(
         unique_results = _dedupe_by_sku(raw_results)
         logger.info(f"[JR-API] after dedup: {len(unique_results)} unique products")
 
-        # Color relevance post-filter: JR API text-searches across all fields (name, URL, etc.)
-        # so non-color products can sneak in. Keep only products where at least one color
-        # field (GrColor, BrColor, ColorFamily, DisplayFilter) contains a requested color term.
+        # Color relevance post-filter.
+        # Primary: match on GrColor (ground/base colour) — the main visible colour of the rug.
+        # Fallback: accept any colour field match so we never drop to zero results.
         if color_check_terms:
-            _COLOR_FIELDS = ("GrColor", "BrColor", "ColorFamily", "DisplayFilter")
-            color_filtered = [
+            _ALL_COLOR_FIELDS = ("GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood")
+            gr_filtered = [
                 p for p in unique_results
-                if any(
-                    term in str(p.get(field) or "").lower()
-                    for term in color_check_terms
-                    for field in _COLOR_FIELDS
-                )
+                if any(_color_field_matches(term, str(p.get("GrColor") or "")) for term in color_check_terms)
             ]
-            if color_filtered:
+            if gr_filtered:
                 logger.info(
-                    f"[JR-API] color relevance filter: {len(unique_results)} → {len(color_filtered)} "
+                    f"[JR-API] GrColor filter: {len(unique_results)} → {len(gr_filtered)} "
                     f"(terms={color_check_terms})"
                 )
-                unique_results = color_filtered
+                unique_results = gr_filtered
             else:
-                logger.warning(
-                    f"[JR-API] color relevance filter would remove all products — skipping "
-                    f"(terms={color_check_terms})"
-                )
+                all_color_filtered = [
+                    p for p in unique_results
+                    if any(
+                        _color_field_matches(term, str(p.get(field) or ""))
+                        for term in color_check_terms
+                        for field in _ALL_COLOR_FIELDS
+                    )
+                ]
+                if all_color_filtered:
+                    logger.info(
+                        f"[JR-API] color fallback filter: {len(unique_results)} → {len(all_color_filtered)} "
+                        f"(terms={color_check_terms})"
+                    )
+                    unique_results = all_color_filtered
+                else:
+                    logger.warning(
+                        f"[JR-API] color filter would remove all products — skipping "
+                        f"(terms={color_check_terms})"
+                    )
 
         # Apply price post-filter
         if price_filter:
