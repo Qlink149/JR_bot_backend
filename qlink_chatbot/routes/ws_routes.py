@@ -117,6 +117,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                 
                 detected_currency = geo.get("currency") or currency_for_country(resolved_country)
                 logger.info(f"[WEB-IN] session={session_id} country={resolved_country} currency={detected_currency} msg={message['content']!r}")
+                debug_tool_calls = []
                 response = await chat_agent(
                     chat_history=session.get("chat_history", []),
                     user_message=message["content"],
@@ -124,6 +125,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     country_code=resolved_country,
                     client_ip=client_ip,
                     detected_currency=detected_currency,
+                    debug_collector=debug_tool_calls,
                 )
                 logger.info(f"[WEB-OUT] session={session_id} reply={response!r}")
 
@@ -147,6 +149,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     "session_id": session_id,
                     "currency": detected_currency,
                     "country": resolved_country,
+                    "tool_calls": debug_tool_calls,
                 })
 
                 await websocket.send_json(ai_response)

@@ -180,6 +180,7 @@ async def chat_agent(
     client_ip="",
     collection_name: str = "users",
     detected_currency: str = "",
+    debug_collector: list = None,
 ):
     """Main Jaipur Rugs chatbot agent."""
     response = None
@@ -267,6 +268,23 @@ async def chat_agent(
                         products,
                         collection_name=collection_name,
                     )
+                    if debug_collector is not None:
+                        debug_collector.append({
+                            "tool": "jaipur_rugs_product_search",
+                            "keyword": keyword,
+                            "currency": args.get("currency", ""),
+                            "products_found": product_count,
+                            "products": [
+                                {
+                                    "name": p.get("name", ""),
+                                    "SKU": p.get("SKU", ""),
+                                    "size": p.get("size", ""),
+                                    "material": p.get("material", ""),
+                                    "display_price": p.get("display_price", ""),
+                                }
+                                for p in (products[:3] if isinstance(products, list) else [])
+                            ],
+                        })
                     output = json.dumps(products)
 
                 elif item.name == "save_user_name":
@@ -289,6 +307,12 @@ async def chat_agent(
                     query = args.get("query")
                     logger.info(f"[AGENT-TOOL] search_kb query={query!r}")
                     kb_search_response = await fetch_similar_sessions(query=query, top_k=5)
+                    if debug_collector is not None:
+                        debug_collector.append({
+                            "tool": "search_kb",
+                            "query": query,
+                            "results_found": len(kb_search_response) if isinstance(kb_search_response, list) else 0,
+                        })
                     output = json.dumps(kb_search_response)
 
                 elif item.name == "search_store_locations":
@@ -296,6 +320,12 @@ async def chat_agent(
                     result = search_store_locations(query=query)
                     store_count = len(result.get("stores", []))
                     logger.info(f"[AGENT-TOOL] search_store_locations query={query!r} → {store_count} store(s)")
+                    if debug_collector is not None:
+                        debug_collector.append({
+                            "tool": "search_store_locations",
+                            "query": query,
+                            "stores_found": store_count,
+                        })
                     output = json.dumps(result)
 
                 elif item.name == "raise_agent_alert":
