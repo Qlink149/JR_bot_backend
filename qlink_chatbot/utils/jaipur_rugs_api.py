@@ -958,7 +958,9 @@ async def jaipur_rugs_product_search(
 
         # Price is post-filtered in Python to handle string/number type inconsistencies in DB
         if price_filter:
+            before_count = len(results)
             results = _apply_price_filter(results, price_filter)
+            logger.info(f"[PRICE-FILTER] filter={price_filter} → {before_count} before, {len(results)} after")
 
         # Weight is post-filtered in Python (may be stored as string in DB)
         if weight_filter is not None:
