@@ -55,7 +55,7 @@ tools = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Single or multi-query string joined by '&'. Examples: 'red', '8x10', 'wool', 'hand knotted', 'red&8x10', 'red&8x10&USD 1000'."
+                    "description": "Search keyword sent to Jaipur Rugs product API. Use '&' to AND multiple terms (all must match) and '||' to OR alternatives (any can match). Examples: 'beige', 'beige&solid', 'wool&8x10', 'hand knotted&modern', 'beige&solid&above INR 50000', 'red||orange', 'red&8x10||blue&8x10'. Include price expressions like 'above INR 50000', 'under USD 1000', 'between INR 20000 and INR 80000' directly in the keyword — the system will extract and apply them as a filter."
                 },
                 "currency": {
                     "type": "string",
