@@ -8,7 +8,11 @@ from docx import Document
 from fastapi import APIRouter, Body, File, Request, UploadFile, Header
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
-from qlink_chatbot.utils.cloudflare_client import s3
+from qlink_chatbot.utils.cloudflare_client import (
+    generate_presigned_put_url,
+    public_url_for_key,
+    upload_object_bytes,
+)
 from qlink_chatbot.utils.wa.send_sarthak_img import send_template_message
 
 from qlink_chatbot.database.mongo_utils import (
@@ -447,37 +451,67 @@ async def delete_alert(id: str):
         logger.error("Error deleting record by id")
 
 @general_router.get("/get-upload-url")
-def get_upload_url(filename: str, email: str):
+def get_upload_url(filename: str, email: str, content_type: str = "application/octet-stream"):
     email = email.lower()
     key = f"{email}/{short_id()}"
+    guessed_type = content_type
+    if guessed_type == "application/octet-stream" and filename:
+        lower = filename.lower()
+        if lower.endswith(".png"):
+            guessed_type = "image/png"
+        elif lower.endswith((".jpg", ".jpeg")):
+            guessed_type = "image/jpeg"
+        elif lower.endswith(".webp"):
+            guessed_type = "image/webp"
+        elif lower.endswith(".gif"):
+            guessed_type = "image/gif"
 
     try:
-        url = s3.generate_presigned_url(
-            ClientMethod="put_object",
-            Params={
-                "Bucket": "jr-chatbot", 
-                "Key": key
-            },
-            ExpiresIn=60
-        )
-
-        public_url = f"https://pub-706af74a9f2443aa9e89918b8fd710b9.r2.dev/jr-chatbot/{key}"
-
+        url = generate_presigned_put_url(key, guessed_type)
         respone = {
             "upload_url": url,
-            "final_url": public_url
+            "final_url": public_url_for_key(key),
         }
-
-        # logger.error("Requst received to generate upload url", extra={"response": respone})
         return JSONResponse(respone, status_code=200)
 
     except Exception as e:
         logger.error("Error occured while generating upload url", extra={"error": e})
 
         return JSONResponse(
-            {"message": "Error occured while generating upload url"}, 
-            status_code=500
+            {"message": "Error occured while generating upload url"},
+            status_code=500,
         )
+
+
+@general_router.post("/upload-image")
+async def upload_image(email: str, file: UploadFile = File(...)):
+    """Upload chat image via backend to avoid browser CORS to R2."""
+    email = (email or "").lower().strip()
+    if not email:
+        return JSONResponse({"message": "Email is required"}, status_code=400)
+
+    content_type = (file.content_type or "").lower()
+    if not content_type.startswith("image/"):
+        return JSONResponse({"message": "Only image uploads are allowed"}, status_code=400)
+
+    body = await file.read()
+    if not body:
+        return JSONResponse({"message": "Empty file"}, status_code=400)
+    if len(body) > 10 * 1024 * 1024:
+        return JSONResponse({"message": "Image must be 10 MB or smaller"}, status_code=400)
+
+    key = f"{email}/{short_id()}"
+    try:
+        final_url = await asyncio.to_thread(
+            upload_object_bytes,
+            key,
+            body,
+            content_type,
+        )
+        return JSONResponse({"final_url": final_url}, status_code=200)
+    except Exception as e:
+        logger.error("Error uploading image to R2", extra={"error": e})
+        return JSONResponse({"message": "Failed to upload image"}, status_code=500)
 
 
 class TriggerRequest(BaseModel):
