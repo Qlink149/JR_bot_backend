@@ -972,6 +972,7 @@ async def jaipur_rugs_product_search(
         if not currency:
             currency = await _resolve_currency_from_ip(client_ip)
         currency_field = CURRENCY_FIELDS.get(currency, "INR_MRP")
+        logger.info(f"[CURRENCY] requested={requested_currency!r} price_filter_currency={(price_filter or {}).get('currency')!r} resolved={currency!r} field={currency_field}")
 
         if color_sku_scores:
             # Prefer products with highest matched requested color percentage after all filters.

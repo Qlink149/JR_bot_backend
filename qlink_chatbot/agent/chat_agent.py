@@ -59,7 +59,7 @@ tools = [
                 },
                 "currency": {
                     "type": "string",
-                    "description": "Display currency for showing product prices. Pass only when the user explicitly requests prices in a specific currency (e.g. 'show prices in USD'). For price filtering such as 'under $500' or 'above INR 30000', include that in the keyword instead (e.g. keyword='under USD 500'). Leave empty when user did not request a specific display currency."
+                    "description": "Display currency for product prices. Rules: (1) If the user mentions a specific currency in a price query — e.g. 'above USD 1000', 'under GBP 500', 'between USD 200 to USD 800' — pass that currency here (e.g. 'USD', 'GBP') AND include the price in the keyword. (2) If the user explicitly asks to see prices in a currency — e.g. 'show prices in EUR' — pass that currency. (3) Otherwise leave empty and the system will use the user's local currency."
                 }
             },
             "required": ["keyword"]
