@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 
 load_dotenv()
 
@@ -52,9 +55,18 @@ def get_cors_origins() -> list[str]:
     return origins
 
 
+def is_behind_proxy_cors() -> bool:
+    return os.getenv("BEHIND_PROXY_CORS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def is_app_cors_enabled() -> bool:
     """App-level CORS is for local/dev only. Production Vultr nginx already sets CORS."""
-    if os.getenv("BEHIND_PROXY_CORS", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if is_behind_proxy_cors():
         return False
     return os.getenv("APP_CORS_ENABLED", "false").strip().lower() in {
         "1",
@@ -62,6 +74,28 @@ def is_app_cors_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+_CORS_RESPONSE_HEADERS = {
+    "access-control-allow-origin",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "access-control-allow-credentials",
+    "access-control-expose-headers",
+    "access-control-max-age",
+}
+
+
+class StripProxyCorsHeadersMiddleware(BaseHTTPMiddleware):
+    """Remove app CORS headers so nginx is the only layer that sets Access-Control-*."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        for header in list(response.headers.keys()):
+            if header.lower() in _CORS_RESPONSE_HEADERS:
+                del response.headers[header]
+        return response
+
 
 app = FastAPI(
     title="Jaipur Rugs chatbot backend API",
@@ -83,6 +117,10 @@ if is_app_cors_enabled():
 else:
     logger.info("[CORS] FastAPI CORSMiddleware disabled (proxy/nginx handles CORS)")
 
+if is_behind_proxy_cors():
+    app.add_middleware(StripProxyCorsHeadersMiddleware)
+    logger.info("[CORS] Stripping app CORS headers (nginx handles CORS)")
+
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["JR"]
@@ -96,6 +134,12 @@ app.include_router(whatsapp_router)
 @app.get("/ping")
 def ping():
     logger.info("Ping endpoint called")
-    return {"message": "Jaipur Rugs chatbot backend API is up and running"}
+    return {
+        "message": "Jaipur Rugs chatbot backend API is up and running",
+        "cors": {
+            "app_cors_enabled": is_app_cors_enabled(),
+            "behind_proxy_cors": is_behind_proxy_cors(),
+        },
+    }
 
 logger.info("Jaipur Rugs backend initialized successfully.")
