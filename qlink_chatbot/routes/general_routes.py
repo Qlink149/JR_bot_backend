@@ -9,8 +9,10 @@ from fastapi import APIRouter, Body, File, Request, UploadFile, Header
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
 from qlink_chatbot.utils.cloudflare_client import (
+    R2NotConfiguredError,
     generate_presigned_put_url,
     public_url_for_key,
+    r2_is_configured,
     upload_object_bytes,
 )
 from qlink_chatbot.utils.wa.send_sarthak_img import send_template_message
@@ -501,6 +503,16 @@ async def upload_image(email: str, file: UploadFile = File(...)):
         return JSONResponse({"message": "Image must be 10 MB or smaller"}, status_code=400)
 
     key = f"{email}/{short_id()}"
+    if not r2_is_configured():
+        logger.error(
+            "Image upload rejected: R2 not configured "
+            f"(access_key_set={bool((os.getenv('R2_ACCESS_KEY') or '').strip())}, "
+            f"secret_key_set={bool((os.getenv('R2_SECRET_KEY') or '').strip())})"
+        )
+        return JSONResponse(
+            {"message": "Image upload is not configured on the server."},
+            status_code=503,
+        )
     try:
         final_url = await asyncio.to_thread(
             upload_object_bytes,
@@ -509,8 +521,14 @@ async def upload_image(email: str, file: UploadFile = File(...)):
             content_type,
         )
         return JSONResponse({"final_url": final_url}, status_code=200)
+    except R2NotConfiguredError as e:
+        logger.error(f"Image upload R2 config error: {e}")
+        return JSONResponse(
+            {"message": "Image upload is not configured on the server."},
+            status_code=503,
+        )
     except Exception as e:
-        logger.error("Error uploading image to R2", extra={"error": e})
+        logger.error(f"Error uploading image to R2: {e}")
         return JSONResponse({"message": "Failed to upload image"}, status_code=500)
 
 

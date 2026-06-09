@@ -63,6 +63,11 @@ jobs:
               cd "$APP_DIR"
             fi
 
+            if [ -z "${{ secrets.R2_ACCESS_KEY }}" ] || [ -z "${{ secrets.R2_SECRET_KEY }}" ]; then
+              echo "WARNING: R2_ACCESS_KEY or R2_SECRET_KEY GitHub secret is empty."
+              echo "Chat image upload will fail until these secrets are configured."
+            fi
+
             DOCKER_BUILDKIT=1 docker build -t "$IMAGE_NAME" .
             docker stop qlink || true
             docker rm qlink || true
@@ -85,6 +90,7 @@ jobs:
               -e PINECONE_API="${{ secrets.PINECONE_API }}" \
               -e R2_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY }}" \
               -e R2_SECRET_KEY="${{ secrets.R2_SECRET_KEY }}" \
+              -e APP_CORS_ENABLED="true" \
               -e WHAPI_TOKEN="${{ secrets.WHAPI_TOKEN }}" \
               -e WEBHOOK_API="${{ secrets.WEBHOOK_API }}" \
               -e QLINK_GUPSHUP_APP_ID="${{ secrets.QLINK_GUPSHUP_APP_ID }}" \
