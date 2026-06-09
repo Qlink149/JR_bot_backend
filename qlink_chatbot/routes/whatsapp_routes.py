@@ -265,7 +265,10 @@ async def _process_message(request_data: dict) -> None:
                         extra={"phone_number": phone_number})
             return
 
+        logger.info(f"[WA-IN] phone={phone_number} name={whatsapp_username!r} msg={user_text!r}")
+
         if user_text == _MEDIA_SENTINEL:
+            logger.info(f"[WA] Media message from {phone_number} — sending not-supported reply")
             dispatch_whatsapp_responses(
                 phone_number=phone_number,
                 bot_responses=[{"type": "text", "text": _IMAGE_NOT_SUPPORTED_RESPONSE}],
@@ -277,34 +280,38 @@ async def _process_message(request_data: dict) -> None:
                                     collection_name=WHATSAPP_COLLECTION_NAME)
 
         if not session:
+            logger.info(f"[WA] New session created for {phone_number}")
             create_session(session_id=session_id, country_code="",
                            name=whatsapp_username, is_ai=True,
                            collection_name=WHATSAPP_COLLECTION_NAME)
             session = {"chat_history": [], "country_code": ""}
-        elif whatsapp_username and whatsapp_username != session.get("user_name", ""):
-            save_user_name(session_id=session_id, name=whatsapp_username,
-                           collection_name=WHATSAPP_COLLECTION_NAME)
+        else:
+            history_len = len(session.get("chat_history") or [])
+            logger.info(f"[WA] Existing session for {phone_number} — history_msgs={history_len} is_ai={session.get('is_ai', True)}")
+            if whatsapp_username and whatsapp_username != session.get("user_name", ""):
+                save_user_name(session_id=session_id, name=whatsapp_username,
+                               collection_name=WHATSAPP_COLLECTION_NAME)
 
         save_message(session_id=session_id, role="user", content=user_text,
                      collection_name=WHATSAPP_COLLECTION_NAME)
 
         if not session.get("is_ai", True):
-            logger.info("Human agent active — skipping AI response",
-                        extra={"phone_number": phone_number})
+            logger.info(f"[WA] Human agent active for {phone_number} — skipping AI")
             return
 
         currency = _currency_from_phone(phone_number)
+        logger.info(f"[WA] Detected currency={currency} for {phone_number}")
 
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(typing_indicator_loop(message_id, stop_typing))
 
         ai_text = ""
         try:
-            # Track existing search count so we can detect if AI fetched new products
             searches_before = get_previous_search(session_id,
                                                   collection_name=WHATSAPP_COLLECTION_NAME)
             count_before = len(searches_before) if searches_before else 0
 
+            logger.info(f"[WA] Calling chat_agent for {phone_number} | msg={user_text!r}")
             ai_text = await chat_agent(
                 chat_history=session.get("chat_history", []),
                 user_message=user_text,
@@ -314,15 +321,19 @@ async def _process_message(request_data: dict) -> None:
                 collection_name=WHATSAPP_COLLECTION_NAME,
                 detected_currency=currency,
             )
+            logger.info(f"[WA-AI] phone={phone_number} ai_response={ai_text!r}")
 
             responses: list[dict] = []
 
-            # If AI called the product search tool, prepend product CTA cards
             searches_after = get_previous_search(session_id,
                                                  collection_name=WHATSAPP_COLLECTION_NAME)
-            if searches_after and len(searches_after) > count_before:
+            new_products_found = searches_after and len(searches_after) > count_before
+            logger.info(f"[WA] Product search triggered={new_products_found} (before={count_before} after={len(searches_after) if searches_after else 0})")
+
+            if new_products_found:
                 latest_products = (searches_after[-1] or {}).get("results", [])
                 if latest_products:
+                    logger.info(f"[WA] Sending {len(latest_products)} product CTA card(s) to {phone_number}")
                     responses.extend(_format_products_for_whatsapp(latest_products, currency))
                     responses.append({
                         "type": "interactive_cta",
@@ -331,10 +342,11 @@ async def _process_message(request_data: dict) -> None:
                         "button_text": "Search More Rugs",
                     })
 
-            # Add AI text response (converted from markdown to WhatsApp format)
             wa_text = _markdown_to_whatsapp(ai_text or "")
             if wa_text:
                 responses.append({"type": "text", "text": wa_text})
+
+            logger.info(f"[WA-OUT] phone={phone_number} dispatching {len(responses)} message(s): types={[r.get('type') for r in responses]}")
 
         finally:
             stop_typing.set()

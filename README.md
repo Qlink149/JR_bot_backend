@@ -1,55 +1,28 @@
 # Jaipur Rugs Bot Backend
 
-This repository contains the Python/FastAPI backend used for the Jaipur Rugs chatbot stack.
-
-Important: production traffic for the Jaipur Rugs WhatsApp and dashboard APIs is handled by the WhatsApp backend deployment:
-
-`https://jaipurrugs-whatsapp-backend.vercel.app`
-
-Use the `whatsapp-integration-updates` branch for backend changes that should be reviewed before production merge.
+FastAPI backend for the Jaipur Rugs chatbot — serves both the Web channel (WebSocket) and WhatsApp channel (Gupshup webhook) from a single Vultr server using the same AI core.
 
 ## Production Architecture
 
-```text
-Web chatbot and dashboard
-https://qlink-jr.vercel.app
-        |
-        | HTTP APIs
-        v
-WhatsApp backend
-https://jaipurrugs-whatsapp-backend.vercel.app
-        |
-        | MongoDB, Pinecone, OpenAI, Jaipur Rugs product API, Gupshup
-        v
-Bot replies, products, alerts, agent handoff
+![Architecture Diagram](docs/architecture.png)
 
-WhatsApp customer
-        |
-        v
-Gupshup webhook
-        |
-        v
-https://jaipurrugs-whatsapp-backend.vercel.app/gupshup/message/hc
-        |
-        v
-Same backend logic
-```
+Both channels use the same `chat_agent.py` (GPT-4.1-mini) and the same tools. The only difference is output rendering:
+- **Web** — returns raw markdown, browser renders it
+- **WhatsApp** — markdown is converted to WhatsApp format (`*bold*`, `_italic_`) and product results are sent as interactive CTA cards (image + button) via Gupshup
 
-The web chatbot realtime socket is the exception. It uses the VPS WebSocket backend:
+**Server:** `api.vultr3.qlink.in` (FastAPI · Docker · Nginx)
 
-`wss://api.vultr3.qlink.in/ws`
-
-Vercel serverless functions are used for HTTP APIs, not long-running WebSocket connections.
+| Channel | Entry point | Session collection |
+| --- | --- | --- |
+| Web (WebSocket) | `ws_routes.py` → `/ws/user/{session_id}/...` | `JR.users` |
+| WhatsApp (Gupshup) | `whatsapp_routes.py` → `POST /gupshup/message/hc` | `JR.users_whatsapp` |
 
 ## Repositories
 
-| Repo | Purpose | Main working branch |
-| --- | --- | --- |
-| `JR_frontend` | Web chatbot and admin dashboard UI | `new-changes` |
-| `jaipurrugs-whatsapp-backend` | Production WhatsApp/dashboard backend | `whatsapp-integration-updates` for review, then merge |
-| `JR_bot_backend` | Local/backend working copy used during development | Keep aligned carefully with WhatsApp backend |
-
-For production backend changes, push to `jaipurrugs-whatsapp-backend` on `whatsapp-integration-updates`. Do not push directly to production `main` unless explicitly approved.
+| Repo | Purpose |
+| --- | --- |
+| `JR_bot_backend` | This repo — unified backend for web + WhatsApp, deployed to Vultr via GitHub Actions |
+| `JR_frontend` | Web chatbot and admin dashboard UI |
 
 ## Main Backend Responsibilities
 
@@ -132,16 +105,13 @@ python -m compileall qlink_chatbot
 
 ## Deployment Notes
 
-Frontend production expects the backend at:
-
-`https://jaipurrugs-whatsapp-backend.vercel.app`
+Push to `main` — GitHub Actions automatically SSHs into the Vultr server, rebuilds the Docker image, and restarts the container.
 
 After backend changes:
 
-1. Push to `whatsapp-integration-updates`.
-2. Open a PR/compare into the production branch.
-3. Merge only after testing.
-4. Confirm the deployed route is live with a safe endpoint check.
+1. Push to `main` (or merge a branch into `main`).
+2. GitHub Actions deploys to `api.vultr3.qlink.in` automatically.
+3. Confirm with `GET https://api.vultr3.qlink.in/ping`.
 
 After frontend changes:
 
