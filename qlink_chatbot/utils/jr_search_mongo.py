@@ -144,13 +144,16 @@ def color_field_matches(term: str, field_value: str) -> bool:
     value = (field_value or "").lower().strip()
     if not value or not term:
         return False
-    pattern = rf"\b{re.escape(term)}\b"
-    if re.search(pattern, value):
-        return True
-    return any(
-        re.search(pattern, part.strip())
-        for part in value.replace("&", " and ").split(" and ")
-    )
+    return bool(re.search(rf"\b{re.escape(term)}\b", value))
+
+
+def product_matches_color_terms(product: dict, terms: set[str]) -> bool:
+    """Match color only on rug/border color names — not broad ColorFamily labels."""
+    for term in terms:
+        for field in ("GrColor", "BrColor"):
+            if color_field_matches(term, str(product.get(field) or "")):
+                return True
+    return False
 
 
 def shape_field_matches(term: str, shape_value: str) -> bool:
@@ -168,12 +171,7 @@ def part_matches_product(product: dict, part: str, segment_type: str) -> bool:
         return False
 
     if segment_type == "color":
-        if color_field_matches(part_lower, str(product.get("GrColor") or "")):
-            return True
-        for field in ("BrColor", "ColorFamily", "DisplayFilter", "ColorMood"):
-            if color_field_matches(part_lower, str(product.get(field) or "")):
-                return True
-        return False
+        return product_matches_color_terms(product, {part_lower})
 
     if segment_type == "shape":
         return shape_field_matches(part_lower, str(product.get("Shape") or ""))
@@ -359,24 +357,18 @@ def apply_search_pipeline(
     logger.info(f"[SEARCH] after dedup: {len(unique_results)} unique products")
 
     if color_check_terms:
-        all_color_fields = ("GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood", "BasicColor")
-        gr_filtered = [
+        color_filtered = [
             p for p in unique_results
-            if any(color_field_matches(term, str(p.get("GrColor") or "")) for term in color_check_terms)
+            if product_matches_color_terms(p, color_check_terms)
         ]
-        if gr_filtered:
-            unique_results = gr_filtered
+        if color_filtered:
+            logger.info(
+                f"[SEARCH] color filter: {len(unique_results)} → {len(color_filtered)} "
+                f"(terms={color_check_terms})"
+            )
+            unique_results = color_filtered
         else:
-            all_color_filtered = [
-                p for p in unique_results
-                if any(
-                    color_field_matches(term, str(p.get(field) or ""))
-                    for term in color_check_terms
-                    for field in all_color_fields
-                )
-            ]
-            if all_color_filtered:
-                unique_results = all_color_filtered
+            return []
 
     unique_results = apply_attribute_post_filters(unique_results, attribute_filters)
     if not unique_results:

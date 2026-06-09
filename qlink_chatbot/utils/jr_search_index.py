@@ -17,6 +17,12 @@ _TOKEN_SOURCE_FIELDS = (
 )
 
 
+_COLOR_TOKEN_FIELDS = ("GrColor", "BrColor", "DisplayFilter", "ColorMood", "BasicColor")
+_NON_COLOR_TOKEN_FIELDS = tuple(
+    f for f in _TOKEN_SOURCE_FIELDS if f not in _COLOR_TOKEN_FIELDS and f != "ColorFamily"
+)
+
+
 def build_search_tokens(product: dict) -> list[str]:
     """Lowercase search tokens indexed on each product document."""
     tokens: set[str] = set()
@@ -31,7 +37,15 @@ def build_search_tokens(product: dict) -> list[str]:
             if len(part) >= 2 or (part.isdigit() and part):
                 tokens.add(part)
 
-    for field in _TOKEN_SOURCE_FIELDS:
+    for field in _COLOR_TOKEN_FIELDS:
+        add(product.get(field))
+
+    # Avoid broad tokens like "red" from "Red and Orange" family labels.
+    color_family = (product.get("ColorFamily") or "").strip()
+    if color_family and " and " not in color_family.lower():
+        add(color_family)
+
+    for field in _NON_COLOR_TOKEN_FIELDS:
         add(product.get(field))
 
     shape = (product.get("Shape") or "").strip()
