@@ -116,6 +116,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                 await websocket.send_json({"type": "typing", "from": "assistant", "is_typing": True})
                 
                 detected_currency = geo.get("currency") or currency_for_country(resolved_country)
+                logger.info(f"[WEB-IN] session={session_id} country={resolved_country} currency={detected_currency} msg={message['content']!r}")
                 response = await chat_agent(
                     chat_history=session.get("chat_history", []),
                     user_message=message["content"],
@@ -124,6 +125,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                     client_ip=client_ip,
                     detected_currency=detected_currency,
                 )
+                logger.info(f"[WEB-OUT] session={session_id} reply={response!r}")
 
                 # Assistant stops typing
                 for a in agents:
@@ -132,10 +134,20 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
 
                 ai_response = {
                     "type": "message",
-                    "from": "assistant", 
+                    "from": "assistant",
                     "content": response or "Error generating response."
                 }
                 save_message(session_id, "assistant", ai_response["content"])
+
+                # Send debug event — visible in browser DevTools console
+                await websocket.send_json({
+                    "type": "debug",
+                    "user_message": message["content"],
+                    "ai_response": response or "",
+                    "session_id": session_id,
+                    "currency": detected_currency,
+                    "country": resolved_country,
+                })
 
                 await websocket.send_json(ai_response)
                 for a in agents:
