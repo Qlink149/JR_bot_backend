@@ -98,12 +98,16 @@ Examples:
 {"keyword": "red&8kg&INR 30000"}
 {"keyword": "above 4lc"}
 {"keyword": "wool&under INR 2 lakh"}
+{"keyword": "between INR 7000 to INR 80000"}
+{"keyword": "wool&between INR 5000 to INR 50000"}
+{"keyword": "between USD 100 to USD 500"}
 
 4. Price Handling
 - Price is optional.
 - Format: <CURRENCY_CODE> <AMOUNT>
 - For budget/below requests use "under <CURRENCY_CODE> <AMOUNT>".
 - For premium/above requests use "above <CURRENCY_CODE> <AMOUNT>".
+- For price range requests use "between <CURRENCY_CODE> <MIN> to <CURRENCY_CODE> <MAX>".
 - Indian shorthand is accepted: 4lc, 4 lakh, 2 lac, 1cr.
 - Near match: ±5%
 - Acceptable match: ±10%
