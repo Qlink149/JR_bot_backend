@@ -219,12 +219,31 @@ async def chat_agent(
             {"role": "developer", "content": "Never produce filler text like 'searching...' or 'one moment please'. If a tool is needed, directly call the tool without any extra wording."},
             {"role": "developer", "content": "When responding: do not add any narrative, status updates, waiting messages, politeness fillers, or redundant sentences. Either answer directly or call a tool directly."},
             {"role": "developer", "content": "In greeting or welcome-style replies, ask the customer what rug size they are looking for. For follow-up size questions after products were shown, answer from Latest shown products context when possible. If the user mentions size but does not identify the product, ask which product they mean and what size they prefer."},
-            {"role": "developer", "content": "For ANY question about stores, showrooms, retail locations, physical presence, address, directions, or timing — including 'do you have stores?', 'do we have stores?', 'any retail store?', 'do we have a retail store?', 'is there a store in [city]?', 'where can I see rugs?' — ALWAYS call `search_store_locations` first (use query 'all stores' if no city given). NEVER answer store questions from your own knowledge. Use only the data returned by the tool."},
+            {"role": "developer", "content": "For ANY question about stores, showrooms, retail locations, physical presence, address, directions, or timing — including 'do you have stores?', 'do we have stores?', 'any retail store?', 'do we have a retail store?', 'where is your nearest store?', 'nearest store', 'is there a store in [city]?', 'where can I see rugs?' — ALWAYS call `search_store_locations` first (use query 'all stores' if no city given). NEVER answer store questions from your own knowledge. Use only the data returned by the tool."},
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
             {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search`; do not recalculate, convert, or pick another MRP value. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
             {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, or any non-product response."},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_message},
         ]
+
+        # Python-level store keyword guard: if the message is about stores/locations,
+        # inject a mandatory instruction so the LLM cannot skip the tool call.
+        _STORE_KEYWORDS = {
+            "store", "stores", "showroom", "showrooms", "retail", "nearest store",
+            "physical store", "visit", "in person", "see rugs", "where can i",
+            "shop location", "outlet", "gallery", "exhibition",
+        }
+        _msg_lower = user_message.lower()
+        if any(kw in _msg_lower for kw in _STORE_KEYWORDS):
+            logger.info(f"[AGENT] Store keyword detected in message — injecting mandatory tool hint")
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    f"The user's message '{user_message}' is a store/location question. "
+                    "You MUST call search_store_locations NOW with query='all stores' before responding. "
+                    "Do not answer from memory. This is mandatory."
+                )
+            })
 
 
         # Step 1: Model processes with tools available
