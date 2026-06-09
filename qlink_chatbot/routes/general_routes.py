@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import time
@@ -87,14 +88,26 @@ def _traffic_source(referrer: str) -> str:
 async def save_visitor_insights(session_id: str, request: Request, payload: dict = Body(...)):
     """Store web visitor context for the live-chat dashboard."""
     try:
-        from qlink_chatbot.utils.geo_utils import get_geo
+        from qlink_chatbot.utils.geo_utils import currency_for_country, get_geo
 
         normalized_session_id = session_id.lower()
         client_ip = _request_ip(request)
-        geo = await get_geo(client_ip)
+        event_type = payload.get("event_type") or "page_view"
+        country_from_payload = (payload.get("country_code") or "").strip()
+
+        # Avoid blocking geo HTTP calls on heartbeats or when the client already sent country.
+        if event_type == "heartbeat" or country_from_payload:
+            iso_code = country_from_payload if len(country_from_payload) == 2 else ""
+            geo = {
+                "country_code": iso_code or country_from_payload,
+                "country": payload.get("country") or "",
+                "city": payload.get("city") or "",
+                "currency": currency_for_country(iso_code) if iso_code else "",
+            }
+        else:
+            geo = await get_geo(client_ip)
         referrer = payload.get("referrer") or ""
         current_page = payload.get("current_page") or ""
-        event_type = payload.get("event_type") or "page_view"
 
         insights = {
             "visitor_id": payload.get("visitor_id") or "",
@@ -130,10 +143,11 @@ async def save_visitor_insights(session_id: str, request: Request, payload: dict
                 "at": payload.get("last_seen_at") or "",
             }
 
-        update_visitor_insights(
+        await asyncio.to_thread(
+            update_visitor_insights,
             normalized_session_id,
-            insights=insights,
-            browsing_event=browsing_event,
+            insights,
+            browsing_event,
         )
         return {"success": True, "visitor_insights": insights}
     except Exception as e:
@@ -412,7 +426,7 @@ async def upload_docx_and_store(file: UploadFile = File(...)):
 async def get_all_alerts():
     """Return all the agents alerts."""
     try:
-        results = list_all_alerts()
+        results = await asyncio.to_thread(list_all_alerts)
         return results if results else []
     except Exception as e:
         logger.error("Error Fetching alerts", extra={"error": e})

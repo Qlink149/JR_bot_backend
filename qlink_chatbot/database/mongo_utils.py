@@ -11,7 +11,12 @@ from qlink_chatbot.utils.logger_config import logger
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
+client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=15000,
+)
 db = client["JR"]
 sessions_collection = db["users"]
 whatsapp_sessions_collection = db["users_whatsapp"]
@@ -474,9 +479,13 @@ def mark_handoff_attended(session_id: str):
         logger.error("Error marking handoff attended", extra={"error": e})
 
 def list_all_alerts():
-    """Util function to return all alerts."""
+    """Util function to return recent alerts."""
     try:
-        result = list(agent_alerts.find())
+        result = list(
+            agent_alerts.find()
+            .sort("created_at", -1)
+            .limit(200)
+        )
         if not result:
             return None
         

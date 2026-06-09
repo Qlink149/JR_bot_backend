@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from openai import AsyncOpenAI
@@ -156,14 +157,193 @@ def format_recent_products_for_ai(previous_searches, max_products: int = 3) -> s
             "name": product.get("name", ""),
             "SKU": product.get("SKU", ""),
             "size": product.get("size", ""),
-            "weight": product.get("weight", ""),
+            "shape": product.get("shape", ""),
+            "color": product.get("color", ""),
+            "pattern": product.get("pattern", ""),
             "material": product.get("material", ""),
             "fabric": product.get("fabric", ""),
+            "construction": product.get("construction", ""),
+            "weight": product.get("weight", ""),
+            "display_price": product.get("display_price", ""),
             "mrp": product.get("mrp", {}),
             "url": product.get("url", ""),
         })
 
     return json.dumps(compact_products)
+
+
+def _latest_search_keyword(previous_searches) -> str:
+    if not previous_searches:
+        return ""
+    latest = previous_searches[-1] if isinstance(previous_searches, list) else {}
+    return (latest.get("keyword") or "").strip() if isinstance(latest, dict) else ""
+
+
+def _shown_skus_from_searches(previous_searches, *, latest_only: bool = True) -> set[str]:
+    if not previous_searches or not isinstance(previous_searches, list):
+        return set()
+
+    searches = [previous_searches[-1]] if latest_only else previous_searches
+    skus: set[str] = set()
+    for search in searches:
+        if not isinstance(search, dict):
+            continue
+        for product in search.get("results", []) or []:
+            if not isinstance(product, dict):
+                continue
+            sku = str(product.get("SKU") or product.get("sku") or "").strip().upper()
+            if sku:
+                skus.add(sku)
+    return skus
+
+
+_PRODUCT_DETAIL_PHRASES = (
+    "price", "cost", "how much", "material", "made of", "fabric", "weight",
+    "link", "url", "sku", "size", "dimension", "first one", "second one",
+    "third one", "that rug", "this rug", "the one", "tell me more about",
+    "more about", "details", "in dollars", "in usd", "in eur", "in gbp",
+    "in aed", "in inr",
+)
+
+_PRODUCT_SHOW_MORE_PHRASES = {
+    "show more", "show me more", "more", "more rugs", "show me more rugs",
+    "show more rugs", "more like these", "show me more like these",
+    "any others", "other options", "see more", "next", "any more",
+    "show others", "other rugs", "more options",
+}
+
+
+def _last_assistant_message(chat_history) -> str:
+    for msg in reversed(chat_history or []):
+        if msg.get("role") == "assistant":
+            return (msg.get("content") or "").lower()
+    return ""
+
+
+def _last_context_is_products(chat_history) -> bool:
+    text = _last_assistant_message(chat_history)
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "jaipurrugs.com/in/rugs",
+            "view product",
+            "search more rugs",
+            "**come around",
+            "material:",
+            "hand knotted",
+            "hand tufted",
+        )
+    ) or (" rug" in text and "retail store" not in text)
+
+
+def _last_context_is_stores(chat_history) -> bool:
+    text = _last_assistant_message(chat_history)
+    if not text:
+        return False
+    if _last_context_is_products(chat_history):
+        return False
+    return any(
+        token in text
+        for token in (
+            "retail store",
+            "showrooms",
+            "showroom",
+            "contact-us",
+            "- timing:",
+            "- address:",
+            "i can show more stores",
+        )
+    )
+
+
+def _is_ambiguous_show_more(user_message: str) -> bool:
+    msg = (user_message or "").lower().strip()
+    return msg in _STORE_FOLLOWUP_PHRASES or msg in _PRODUCT_SHOW_MORE_PHRASES
+
+
+def _extract_show_more_keyword(user_message: str) -> str:
+    """Parse 'show more 5x5 rugs' → '5x5'."""
+    msg = (user_message or "").lower().strip()
+    for prefix in ("show me more ", "show more "):
+        if not msg.startswith(prefix):
+            continue
+        remainder = msg[len(prefix):].strip()
+        for suffix in (" rugs", " rug", " carpets", " carpet", " options", " products"):
+            if remainder.endswith(suffix):
+                remainder = remainder[: -len(suffix)].strip()
+        if remainder and remainder not in {"rugs", "rug", "more", "options", "products"}:
+            return remainder
+    return ""
+
+
+def _shown_skus_for_keyword(previous_searches, keyword: str) -> set[str]:
+    target = normalise_search_keyword(keyword)
+    skus: set[str] = set()
+    for search in previous_searches or []:
+        if not isinstance(search, dict):
+            continue
+        if normalise_search_keyword(search.get("keyword") or "") != target:
+            continue
+        for product in search.get("results", []) or []:
+            if not isinstance(product, dict):
+                continue
+            sku = str(product.get("SKU") or product.get("sku") or "").strip().upper()
+            if sku:
+                skus.add(sku)
+    return skus
+
+
+def _resolve_show_more_search(previous_searches, user_message: str) -> tuple[str, set[str]]:
+    explicit = _extract_show_more_keyword(user_message)
+    if explicit:
+        return explicit, _shown_skus_for_keyword(previous_searches, explicit)
+    last_keyword = _latest_search_keyword(previous_searches)
+    return last_keyword, _shown_skus_from_searches(previous_searches, latest_only=True)
+
+
+def _recent_chat_mentions_products(chat_history, limit: int = 8) -> bool:
+    recent = format_recent_chat_for_ai(chat_history, limit=limit).lower()
+    return any(
+        token in recent
+        for token in ("rug", "sku", "inr", "usd", "jaipurrugs.com/in/rugs", "display_price", "![")
+    )
+
+
+def _is_product_show_more_followup(
+    user_message: str,
+    chat_history,
+    previous_searches=None,
+) -> bool:
+    msg = (user_message or "").lower().strip()
+    if _extract_show_more_keyword(user_message):
+        return True
+
+    is_phrase = (
+        msg in _PRODUCT_SHOW_MORE_PHRASES
+        or any(
+            phrase in msg
+            for phrase in ("show more", "more rug", "more like", "any other", "other option", "see more")
+        )
+    )
+    if not is_phrase:
+        return False
+
+    if _last_context_is_products(chat_history):
+        return True
+    if previous_searches and _latest_search_keyword(previous_searches):
+        return not _last_context_is_stores(chat_history)
+    return _recent_chat_mentions_products(chat_history) and not _last_context_is_stores(chat_history)
+
+
+def _is_product_detail_followup(user_message: str, chat_history) -> bool:
+    msg = (user_message or "").lower().strip()
+    if not _recent_chat_mentions_products(chat_history):
+        return False
+    if _is_product_show_more_followup(user_message, chat_history):
+        return False
+    return any(phrase in msg for phrase in _PRODUCT_DETAIL_PHRASES)
 
 def agent_alert_tool(alert, sesson_id):
     """Tool function to raise an agent alert"""
@@ -190,14 +370,17 @@ _STORE_FOLLOWUP_PHRASES = {
 }
 
 
-def _is_store_query(user_message: str, chat_history) -> bool:
+def _is_store_query(user_message: str, chat_history, previous_searches=None) -> bool:
     msg_lower = (user_message or "").lower().strip()
     if any(kw in msg_lower for kw in _STORE_KEYWORDS):
         return True
 
-    if msg_lower in _STORE_FOLLOWUP_PHRASES:
-        recent_context = format_recent_chat_for_ai(chat_history, limit=4).lower()
-        return any(kw in recent_context for kw in ("store", "showroom", "retail", "address", "timing"))
+    if msg_lower in _STORE_FOLLOWUP_PHRASES or _is_ambiguous_show_more(user_message):
+        if _is_product_show_more_followup(user_message, chat_history, previous_searches):
+            return False
+        if _last_context_is_products(chat_history):
+            return False
+        return _last_context_is_stores(chat_history)
 
     return False
 
@@ -272,6 +455,92 @@ def _format_store_response(store_result: dict, limit: int = 3, offset: int = 0) 
     return "\n".join(lines)
 
 
+async def _run_product_show_more(
+    *,
+    user_message: str,
+    session_id: str,
+    chat_history,
+    previous_searches,
+    system_prompt: str,
+    client_ip: str,
+    country_code: str,
+    detected_currency: str,
+    collection_name: str,
+    debug_collector: list | None,
+) -> str | None:
+    """Paginate product results for show-more follow-ups. Returns message or None."""
+    if not _is_product_show_more_followup(user_message, chat_history, previous_searches):
+        return None
+
+    search_keyword, exclude_skus = _resolve_show_more_search(previous_searches, user_message)
+    if not search_keyword:
+        return None
+
+    logger.info(
+        f"[AGENT-GUARD] show-more keyword={search_keyword!r} exclude_skus={exclude_skus}"
+    )
+    more_products = await jaipur_rugs_product_search(
+        search_keyword,
+        client_ip=client_ip,
+        country_code=country_code,
+        requested_currency=detected_currency,
+        exclude_skus=exclude_skus or None,
+    )
+    if isinstance(more_products, dict) and more_products.get("error"):
+        return (
+            f"I couldn't find more rugs matching your search ({search_keyword}). "
+            "Would you like to try a different size, shape, or budget?"
+        )
+    if not isinstance(more_products, list) or not more_products:
+        return None
+
+    save_previous_search(
+        session_id,
+        search_keyword,
+        more_products,
+        collection_name=collection_name,
+    )
+    if debug_collector is not None:
+        debug_collector.append({
+            "tool": "jaipur_rugs_product_search",
+            "keyword": normalise_search_keyword(search_keyword),
+            "keyword_raw": search_keyword,
+            "keyword_sent_to_api": normalise_search_keyword(search_keyword),
+            "follow_up": "show_more",
+            "excluded_skus": sorted(exclude_skus),
+            "products_found": len(more_products),
+            "products": [
+                {
+                    "name": p.get("name", ""),
+                    "SKU": p.get("SKU", ""),
+                    "display_price": p.get("display_price", ""),
+                }
+                for p in more_products[:3]
+            ],
+        })
+
+    show_more_response = await client.responses.create(
+        model="gpt-4.1-mini",
+        instructions=system_prompt,
+        input=[
+            {
+                "role": "developer",
+                "content": (
+                    "User asked to see MORE rugs from the same search. "
+                    f"Search keyword: {search_keyword!r}. "
+                    "Do NOT call jaipur_rugs_product_search or search_store_locations. "
+                    f"Format these new products: {json.dumps(more_products)}"
+                ),
+            },
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0,
+        text=output_schema,
+    )
+    output = json.loads(show_more_response.output[0].content[0].text)
+    return output.get("message", "")
+
+
 async def chat_agent(
     chat_history,
     user_message,
@@ -288,20 +557,10 @@ async def chat_agent(
     try:
         logger.info(f"[AGENT-IN] session={session_id} collection={collection_name} currency={detected_currency} image={'yes' if image_url else 'no'} msg={user_message!r}")
 
-        if _is_store_query(user_message, chat_history):
-            store_query = _store_query_from_message(user_message)
-            store_result = search_store_locations(query=store_query)
-            store_count = len(store_result.get("stores", []))
-            logger.info(f"[AGENT-GUARD] store query={store_query!r} -> {store_count} store(s)")
-            if debug_collector is not None:
-                debug_collector.append({
-                    "tool": "search_store_locations",
-                    "query": store_query,
-                    "stores_found": store_count,
-                })
-            offset = 3 if _is_store_more_followup(user_message) else 0
-            limit = 6 if offset else 3
-            return _format_store_response(store_result, limit=limit, offset=offset)
+        previous_searches = get_previous_search(
+            session_id=session_id,
+            collection_name=collection_name,
+        )
 
         if not client:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -315,9 +574,37 @@ async def chat_agent(
                 system_others=system_prompt_variable["system_others"],
             )
         else:
-            system_prompt = build_system_prompt() 
-            
+            system_prompt = build_system_prompt()
 
+        show_more_reply = await _run_product_show_more(
+            user_message=user_message,
+            session_id=session_id,
+            chat_history=chat_history,
+            previous_searches=previous_searches,
+            system_prompt=system_prompt,
+            client_ip=client_ip,
+            country_code=country_code,
+            detected_currency=detected_currency,
+            collection_name=collection_name,
+            debug_collector=debug_collector,
+        )
+        if show_more_reply:
+            return show_more_reply
+
+        if _is_store_query(user_message, chat_history, previous_searches):
+            store_query = _store_query_from_message(user_message)
+            store_result = search_store_locations(query=store_query)
+            store_count = len(store_result.get("stores", []))
+            logger.info(f"[AGENT-GUARD] store query={store_query!r} -> {store_count} store(s)")
+            if debug_collector is not None:
+                debug_collector.append({
+                    "tool": "search_store_locations",
+                    "query": store_query,
+                    "stores_found": store_count,
+                })
+            offset = 3 if _is_store_more_followup(user_message) else 0
+            limit = 6 if offset else 3
+            return _format_store_response(store_result, limit=limit, offset=offset)
 
         _IST = timezone(timedelta(hours=5, minutes=30))
         _now_ist = datetime.now(_IST)
@@ -355,6 +642,40 @@ async def chat_agent(
                 ),
             },
         ]
+
+        if previous_searches:
+            latest_keyword = _latest_search_keyword(previous_searches)
+            input_list.insert(1, {
+                "role": "developer",
+                "content": (
+                    "Latest shown products for follow-up Q&A "
+                    f"(last search keyword: {latest_keyword!r}). "
+                    "Use this JSON for price, size, material, weight, SKU, link, or color questions. "
+                    "Do NOT call jaipur_rugs_product_search for these detail follow-ups: "
+                    f"{format_recent_products_for_ai(previous_searches)}"
+                ),
+            })
+
+        if _is_product_detail_followup(user_message, chat_history):
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    "This message is a follow-up about previously shown products. "
+                    "Answer from Latest shown products context only. "
+                    "Do NOT call jaipur_rugs_product_search."
+                ),
+            })
+
+        if _last_context_is_products(chat_history) and _is_ambiguous_show_more(user_message):
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    "The user's last assistant reply showed RUG PRODUCTS. "
+                    "If they said 'show more' or similar, paginate more rugs with "
+                    "jaipur_rugs_product_search using the same keyword as the last search. "
+                    "Do NOT call search_store_locations."
+                ),
+            })
 
         # Python-level store guard: pre-fetch store data and inject into context so the
         # LLM always has verified store data regardless of whether it calls the tool.
@@ -403,6 +724,15 @@ async def chat_agent(
 
                 if item.name == "jaipur_rugs_product_search":
                     keyword = resolve_search_keyword(args, user_message)
+                    exclude_skus = None
+                    if _is_product_show_more_followup(user_message, chat_history, previous_searches):
+                        exclude_skus = _shown_skus_from_searches(previous_searches, latest_only=True)
+                        last_keyword = _latest_search_keyword(previous_searches)
+                        if last_keyword and (
+                            not keyword
+                            or keyword.lower().strip() in _PRODUCT_SHOW_MORE_PHRASES
+                        ):
+                            keyword = last_keyword
                     keyword_sent_to_api = normalise_search_keyword(keyword)
                     if not keyword:
                         logger.warning(
@@ -414,6 +744,7 @@ async def chat_agent(
                         client_ip=client_ip,
                         country_code=country_code,
                         requested_currency=args.get("currency", ""),
+                        exclude_skus=exclude_skus,
                     )
                     product_count = len(products) if isinstance(products, list) else 0
                     logger.info(
