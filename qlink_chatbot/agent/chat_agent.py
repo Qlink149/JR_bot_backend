@@ -412,6 +412,8 @@ def _is_new_product_search_request(user_message: str, chat_history, previous_sea
         return False
     if _is_store_query(user_message, chat_history, previous_searches):
         return False
+    if _is_rug_pad_query(user_message) or _is_order_address_query(user_message):
+        return False
     msg = (user_message or "").lower().strip()
     if _SEARCH_INTENT_RE.search(msg):
         return True
@@ -460,8 +462,45 @@ _STORE_KEYWORDS = {
     "retailers", "standalone", "offline", "physical", "nearest store",
     "physical store", "visit", "in person", "see rugs", "where can i",
     "shop location", "outlet", "outlets", "gallery", "galleries",
-    "address", "directions", "timing", "timings",
+    "directions", "timing", "timings",
 }
+
+_ORDER_ADDRESS_PHRASES = (
+    "delivery address",
+    "shipping address",
+    "change my address",
+    "change the address",
+    "update my address",
+    "update delivery",
+    "change delivery",
+    "wrong address",
+    "incorrect address",
+)
+
+
+def _is_order_address_query(user_message: str) -> bool:
+    msg_lower = (user_message or "").lower()
+    return any(phrase in msg_lower for phrase in _ORDER_ADDRESS_PHRASES)
+
+
+_RUG_PAD_PHRASES = (
+    "rug pad",
+    "rug pads",
+    "anti-slip",
+    "anti slip",
+    "antiskid",
+    "anti-skid",
+    "underlay",
+    "underlays",
+    "slipping",
+    "slip mat",
+    "slip mats",
+)
+
+
+def _is_rug_pad_query(user_message: str) -> bool:
+    msg_lower = (user_message or "").lower()
+    return any(phrase in msg_lower for phrase in _RUG_PAD_PHRASES)
 
 _STORE_FOLLOWUP_PHRASES = {
     "show more", "more", "next", "more stores", "show other stores",
@@ -471,6 +510,11 @@ _STORE_FOLLOWUP_PHRASES = {
 
 def _is_store_query(user_message: str, chat_history, previous_searches=None) -> bool:
     msg_lower = (user_message or "").lower().strip()
+    if _is_order_address_query(user_message):
+        return False
+    if "address" in msg_lower and not _is_order_address_query(user_message):
+        if any(kw in msg_lower for kw in ("store", "showroom", "retail", "gallery", "outlet", "nearest")):
+            return True
     if any(kw in msg_lower for kw in _STORE_KEYWORDS):
         return True
 
@@ -692,6 +736,22 @@ async def chat_agent(
         )
         if show_more_reply:
             return show_more_reply
+
+        if _is_order_address_query(user_message):
+            return (
+                "For delivery or shipping address changes, please contact our after-sales team at "
+                "order-update@jaipurrugs.com or call +91 7665017083. Share your order number and "
+                "the correct address — they will assist you."
+            )
+
+        if _is_rug_pad_query(user_message):
+            return (
+                "Yes, we sell custom anti-slip mats (rug pads) tailored to your rug size. They help "
+                "with slip resistance, floor protection, cushioning, and longer rug life. "
+                "Learn more: https://www.jaipurrugs.com/in/know-your-rug/about-rug-pads. "
+                "For sizing or purchase help, contact shop@jaipurrugs.com or +91 8000295928 "
+                "(WhatsApp available)."
+            )
 
         if _is_store_query(user_message, chat_history, previous_searches):
             store_query = _store_query_from_message(user_message)
@@ -941,10 +1001,15 @@ async def chat_agent(
                     logger.info(f"[AGENT-TOOL] search_kb query={query!r}")
                     kb_search_response = await fetch_similar_sessions(query=query, top_k=5)
                     if debug_collector is not None:
+                        kb_hits = 0
+                        if isinstance(kb_search_response, list):
+                            kb_hits = len(kb_search_response)
+                        elif isinstance(kb_search_response, str) and kb_search_response.strip():
+                            kb_hits = kb_search_response.count("Source:")
                         debug_collector.append({
                             "tool": "search_kb",
                             "query": query,
-                            "results_found": len(kb_search_response) if isinstance(kb_search_response, list) else 0,
+                            "results_found": kb_hits,
                         })
                     output = json.dumps(kb_search_response)
 
