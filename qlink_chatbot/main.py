@@ -4,9 +4,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 load_dotenv()
 
@@ -86,15 +84,31 @@ _CORS_RESPONSE_HEADERS = {
 }
 
 
-class StripProxyCorsHeadersMiddleware(BaseHTTPMiddleware):
-    """Remove app CORS headers so nginx is the only layer that sets Access-Control-*."""
+class StripProxyCorsHeadersMiddleware:
+    """Remove app CORS headers so nginx is the only layer that sets Access-Control-*.
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        response = await call_next(request)
-        for header in list(response.headers.keys()):
-            if header.lower() in _CORS_RESPONSE_HEADERS:
-                del response.headers[header]
-        return response
+    Pure ASGI middleware (not BaseHTTPMiddleware) so WebSocket upgrades keep working.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_without_cors(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() not in _CORS_RESPONSE_HEADERS
+                ]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_without_cors)
 
 
 app = FastAPI(

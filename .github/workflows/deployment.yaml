@@ -69,41 +69,75 @@ jobs:
             fi
 
             DOCKER_BUILDKIT=1 docker build -t "$IMAGE_NAME" .
+
+            run_container() {
+              docker run -d \
+                --name "$1" \
+                -p "$2:8000" \
+                -e PYTHONUNBUFFERED=1 \
+                -e PYTHONDONTWRITEBYTECODE=1 \
+                -e MONGO_URI="${{ secrets.MONGO_URI }}" \
+                -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+                -e GUPSHUP_APP_ID="${{ secrets.GUPSHUP_APP_ID }}" \
+                -e GUPSHUP_TOKEN="${{ secrets.GUPSHUP_TOKEN }}" \
+                -e GUPSHUP_APP_NAME="${{ secrets.GUPSHUP_APP_NAME }}" \
+                -e GUPSHUP_API_KEY="${{ secrets.GUPSHUP_API_KEY }}" \
+                -e GUPSHUP_SOURCE="${{ secrets.GUPSHUP_SOURCE }}" \
+                -e DEFAULT_COUNTRY_CODE="${{ secrets.DEFAULT_COUNTRY_CODE }}" \
+                -e ENV_MODE="${{ secrets.ENV_MODE }}" \
+                -e PINECONE_API="${{ secrets.PINECONE_API }}" \
+                -e R2_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY }}" \
+                -e R2_SECRET_KEY="${{ secrets.R2_SECRET_KEY }}" \
+                -e BEHIND_PROXY_CORS="true" \
+                -e APP_CORS_ENABLED="false" \
+                -e WHAPI_TOKEN="${{ secrets.WHAPI_TOKEN }}" \
+                -e WEBHOOK_API="${{ secrets.WEBHOOK_API }}" \
+                -e QLINK_GUPSHUP_APP_ID="${{ secrets.QLINK_GUPSHUP_APP_ID }}" \
+                -e QLINK_GUPSHUP_PARTNER_APP_TOKEN="${{ secrets.QLINK_GUPSHUP_PARTNER_APP_TOKEN }}" \
+                -e QLINK_GUPSHUP_SOURCE="${{ secrets.QLINK_GUPSHUP_SOURCE }}" \
+                -e QLINK_GUPSHUP_APP_NAME="${{ secrets.QLINK_GUPSHUP_APP_NAME }}" \
+                -e JR_API_USERNAME="${{ secrets.JR_API_USERNAME }}" \
+                -e JR_API_PASSWORD="${{ secrets.JR_API_PASSWORD }}" \
+                -e JR_API_CLIENT_ID="${{ secrets.JR_API_CLIENT_ID }}" \
+                -e JR_API_CLIENT_SECRET="${{ secrets.JR_API_CLIENT_SECRET }}" \
+                -e CORS_ORIGINS="${{ secrets.CORS_ORIGINS }}" \
+                "$IMAGE_NAME"
+            }
+
+            wait_for_ping() {
+              local url="$1"
+              local attempts="$2"
+              for i in $(seq 1 "$attempts"); do
+                if curl -sf "$url" >/dev/null; then
+                  echo "Healthy: $url (attempt $i)"
+                  return 0
+                fi
+                sleep 2
+              done
+              return 1
+            }
+
+            docker stop qlink_staging || true
+            docker rm qlink_staging || true
+            run_container qlink_staging 8001
+
+            if ! wait_for_ping "http://127.0.0.1:8001/ping" 60; then
+              echo "New container failed health check on port 8001"
+              docker logs qlink_staging || true
+              exit 1
+            fi
+
             docker stop qlink || true
             docker rm qlink || true
-            docker ps -q --filter "publish=8000" | xargs -r docker stop || true
-            docker ps -aq --filter "publish=8000" | xargs -r docker rm || true
-            docker run -d \
-              --name qlink \
-              -p 8000:8000 \
-              -e PYTHONUNBUFFERED=1 \
-              -e PYTHONDONTWRITEBYTECODE=1 \
-              -e MONGO_URI="${{ secrets.MONGO_URI }}" \
-              -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
-              -e GUPSHUP_APP_ID="${{ secrets.GUPSHUP_APP_ID }}" \
-              -e GUPSHUP_TOKEN="${{ secrets.GUPSHUP_TOKEN }}" \
-              -e GUPSHUP_APP_NAME="${{ secrets.GUPSHUP_APP_NAME }}" \
-              -e GUPSHUP_API_KEY="${{ secrets.GUPSHUP_API_KEY }}" \
-              -e GUPSHUP_SOURCE="${{ secrets.GUPSHUP_SOURCE }}" \
-              -e DEFAULT_COUNTRY_CODE="${{ secrets.DEFAULT_COUNTRY_CODE }}" \
-              -e ENV_MODE="${{ secrets.ENV_MODE }}" \
-              -e PINECONE_API="${{ secrets.PINECONE_API }}" \
-              -e R2_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY }}" \
-              -e R2_SECRET_KEY="${{ secrets.R2_SECRET_KEY }}" \
-              -e BEHIND_PROXY_CORS="true" \
-              -e APP_CORS_ENABLED="false" \
-              -e WHAPI_TOKEN="${{ secrets.WHAPI_TOKEN }}" \
-              -e WEBHOOK_API="${{ secrets.WEBHOOK_API }}" \
-              -e QLINK_GUPSHUP_APP_ID="${{ secrets.QLINK_GUPSHUP_APP_ID }}" \
-              -e QLINK_GUPSHUP_PARTNER_APP_TOKEN="${{ secrets.QLINK_GUPSHUP_PARTNER_APP_TOKEN }}" \
-              -e QLINK_GUPSHUP_SOURCE="${{ secrets.QLINK_GUPSHUP_SOURCE }}" \
-              -e QLINK_GUPSHUP_APP_NAME="${{ secrets.QLINK_GUPSHUP_APP_NAME }}" \
-              -e JR_API_USERNAME="${{ secrets.JR_API_USERNAME }}" \
-              -e JR_API_PASSWORD="${{ secrets.JR_API_PASSWORD }}" \
-              -e JR_API_CLIENT_ID="${{ secrets.JR_API_CLIENT_ID }}" \
-              -e JR_API_CLIENT_SECRET="${{ secrets.JR_API_CLIENT_SECRET }}" \
-              -e CORS_ORIGINS="${{ secrets.CORS_ORIGINS }}" \
-              "$IMAGE_NAME"
+            docker stop qlink_staging || true
+            docker rm qlink_staging || true
+            run_container qlink 8000
+
+            if ! wait_for_ping "http://127.0.0.1:8000/ping" 30; then
+              echo "Production container failed health check on port 8000"
+              docker logs qlink || true
+              exit 1
+            fi
 
       - name: Cleanup
         uses: appleboy/ssh-action@master
