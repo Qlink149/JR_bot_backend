@@ -16,6 +16,9 @@ from qlink_chatbot.utils.jr_search_aliases import (
     ROUND_SIZE_PATTERN,
     WEIGHT_PATTERN,
     color_search_terms,
+    color_match_is_strict,
+    COLOR_FAMILY_FIELDS,
+    COLOR_GRBR_FIELDS,
 )
 from qlink_chatbot.utils.jr_search_currency import apply_price_filter
 from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
@@ -47,7 +50,8 @@ PATTERN_RAW_FIELDS = (
     "raw.Style",
     "raw.DecoreStyle",
 )
-COLOR_RAW_FIELDS = ("raw.GrColor", "raw.BrColor")
+COLOR_RAW_FIELDS = tuple(f"raw.{field}" for field in COLOR_GRBR_FIELDS)
+COLOR_FAMILY_RAW_FIELDS = tuple(f"raw.{field}" for field in COLOR_FAMILY_FIELDS)
 
 
 def size_regex(size_text: str) -> str:
@@ -175,6 +179,8 @@ def segment_to_mongo_clause(segment: str) -> dict:
         unique_tokens = list(dict.fromkeys(tokens))
         clauses.append({"search_tokens": {"$in": unique_tokens}})
         clauses.extend(_regex_or_clauses(COLOR_RAW_FIELDS, unique_tokens))
+        if not color_match_is_strict(set(unique_tokens)):
+            clauses.extend(_regex_or_clauses(COLOR_FAMILY_RAW_FIELDS, unique_tokens))
     elif segment_type == "pattern":
         unique_tokens = list(dict.fromkeys(tokens))
         if len(unique_tokens) == 1:
@@ -206,9 +212,12 @@ def color_field_matches(term: str, field_value: str) -> bool:
 
 
 def product_matches_color_terms(product: dict, terms: set[str]) -> bool:
-    """Match color only on rug/border color names — not broad ColorFamily labels."""
+    """Match color on rug/border names; non-strict colors also use family/display fields."""
+    fields = list(COLOR_GRBR_FIELDS)
+    if not color_match_is_strict(terms):
+        fields.extend(COLOR_FAMILY_FIELDS)
     for term in terms:
-        for field in ("GrColor", "BrColor"):
+        for field in fields:
             if color_field_matches(term, str(product.get(field) or "")):
                 return True
     return False

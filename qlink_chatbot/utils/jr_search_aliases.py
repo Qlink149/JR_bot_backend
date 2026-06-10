@@ -150,6 +150,13 @@ KNOWN_SHAPE_VALUES = {k.lower() for k in SHAPE_ALIASES} | {v.lower() for v in SH
 # Post-filter and indexed query use only the user's term for these colors.
 STRICT_COLOR_KEYS = frozenset({"pink", "red"})
 
+COLOR_GRBR_FIELDS = ("GrColor", "BrColor")
+COLOR_FAMILY_FIELDS = ("ColorFamily", "DisplayFilter", "ColorMood", "BasicColor")
+
+
+def color_match_is_strict(terms: set[str]) -> bool:
+    return bool(terms) and terms <= STRICT_COLOR_KEYS
+
 
 def color_search_terms(segment: str) -> list[str]:
     """Lowercase color tokens for Mongo queries and post-filters."""
