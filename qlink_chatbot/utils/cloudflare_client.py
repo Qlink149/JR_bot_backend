@@ -83,7 +83,17 @@ def public_url_for_key(key: str) -> str:
     # Guard against misconfigured env that duplicates the bucket segment in the path.
     if R2_BUCKET and base.endswith(f"/{R2_BUCKET}"):
         base = base[: -len(f"/{R2_BUCKET}")]
-    return f"{base}/{key.lstrip('/')}"
+    return normalize_public_image_url(f"{base}/{key.lstrip('/')}")
+
+
+def normalize_public_image_url(url: str) -> str:
+    """Fix r2.dev URLs that incorrectly include the bucket name in the path."""
+    if not url or not R2_BUCKET:
+        return url
+    marker = f".r2.dev/{R2_BUCKET}/"
+    if marker in url:
+        return url.replace(marker, ".r2.dev/", 1)
+    return url
 
 
 def upload_object_bytes(key: str, body: bytes, content_type: str) -> str:

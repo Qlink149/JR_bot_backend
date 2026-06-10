@@ -17,6 +17,7 @@ from qlink_chatbot.database.mongo_utils import (
 )
 from qlink_chatbot.utils.geo_utils import get_geo, currency_for_country
 from qlink_chatbot.database.pinecone_utils import store_vector_summary
+from qlink_chatbot.utils.cloudflare_client import normalize_public_image_url
 from qlink_chatbot.utils.logger_config import logger
 
 MONGO_URI = os.getenv("MONGO_URI")
@@ -112,7 +113,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
             if msg.get("from") != "user":
                 continue
 
-            image_url = _extract_image_url(msg)
+            image_url = normalize_public_image_url(_extract_image_url(msg))
             message = {
                 "type": "message",
                 "from": "user",
