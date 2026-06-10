@@ -105,6 +105,7 @@ SEARCH_CASES = [
     ("Color: terracotta",                   "terracotta",                   "91", ""),
     ("Color: olive OR sage",                "olive||sage",                  "91", ""),
     ("Color: navy blue",                    "navy",                         "91", ""),
+    ("Color: blue excludes border-only",    "blue",                         "91", ""),
     ("Color: red AND gold",                 "red&gold",                     "91", ""),
     ("Color: pink rugs",                    "pink",                         "91", ""),
     ("Color: pink (natural language)",      "Show me pink rugs",            "91", ""),

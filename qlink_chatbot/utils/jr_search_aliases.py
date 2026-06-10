@@ -150,7 +150,7 @@ KNOWN_SHAPE_VALUES = {k.lower() for k in SHAPE_ALIASES} | {v.lower() for v in SH
 # Post-filter and indexed query use only the user's term for these colors.
 STRICT_COLOR_KEYS = frozenset({"pink", "red"})
 
-COLOR_GRBR_FIELDS = ("GrColor", "BrColor")
+COLOR_MATCH_FIELDS = ("GrColor",)
 COLOR_FAMILY_FIELDS = ("ColorFamily", "DisplayFilter", "ColorMood", "BasicColor")
 
 

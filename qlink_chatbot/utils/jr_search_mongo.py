@@ -18,7 +18,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     color_search_terms,
     color_match_is_strict,
     COLOR_FAMILY_FIELDS,
-    COLOR_GRBR_FIELDS,
+    COLOR_MATCH_FIELDS,
 )
 from qlink_chatbot.utils.jr_search_currency import apply_price_filter
 from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
@@ -50,7 +50,7 @@ PATTERN_RAW_FIELDS = (
     "raw.Style",
     "raw.DecoreStyle",
 )
-COLOR_RAW_FIELDS = tuple(f"raw.{field}" for field in COLOR_GRBR_FIELDS)
+COLOR_RAW_FIELDS = tuple(f"raw.{field}" for field in COLOR_MATCH_FIELDS)
 COLOR_FAMILY_RAW_FIELDS = tuple(f"raw.{field}" for field in COLOR_FAMILY_FIELDS)
 
 
@@ -212,8 +212,8 @@ def color_field_matches(term: str, field_value: str) -> bool:
 
 
 def product_matches_color_terms(product: dict, terms: set[str]) -> bool:
-    """Match color on rug/border names; non-strict colors also use family/display fields."""
-    fields = list(COLOR_GRBR_FIELDS)
+    """Match on ground color (GrColor) and, for broad palettes, ColorFamily — not border-only."""
+    fields = list(COLOR_MATCH_FIELDS)
     if not color_match_is_strict(terms):
         fields.extend(COLOR_FAMILY_FIELDS)
     for term in terms:
