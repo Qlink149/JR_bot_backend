@@ -146,3 +146,23 @@ def collect_known_catalog_values() -> tuple[set[str], set[str]]:
 
 KNOWN_COLOR_VALUES, KNOWN_PATTERN_VALUES = collect_known_catalog_values()
 KNOWN_SHAPE_VALUES = {k.lower() for k in SHAPE_ALIASES} | {v.lower() for v in SHAPE_ALIASES.values()}
+
+# Post-filter and indexed query use only the user's term for these colors.
+STRICT_COLOR_KEYS = frozenset({"pink", "red"})
+
+
+def color_search_terms(segment: str) -> list[str]:
+    """Lowercase color tokens for Mongo queries and post-filters."""
+    key = (segment or "").strip().lower()
+    if not key:
+        return []
+    if key not in COLOR_ALIASES or key in STRICT_COLOR_KEYS:
+        return [key]
+
+    terms = [key]
+    expansion = COLOR_ALIASES[key]
+    if "||" in expansion:
+        terms.extend(part.strip().lower() for part in expansion.split("||") if part.strip())
+    elif expansion.strip():
+        terms.append(expansion.strip().lower())
+    return list(dict.fromkeys(terms))

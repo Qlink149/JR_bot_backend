@@ -15,6 +15,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     SIZE_PATTERN,
     ROUND_SIZE_PATTERN,
     WEIGHT_PATTERN,
+    color_search_terms,
 )
 from qlink_chatbot.utils.jr_search_currency import apply_price_filter
 from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
@@ -39,6 +40,14 @@ COMPACT_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
     "pattern": ("search.style",),
     "room": ("search.room",),
 }
+
+PATTERN_RAW_FIELDS = (
+    "raw.Pattern",
+    "raw.StylePattern",
+    "raw.Style",
+    "raw.DecoreStyle",
+)
+COLOR_RAW_FIELDS = ("raw.GrColor", "raw.BrColor")
 
 
 def size_regex(size_text: str) -> str:
@@ -133,6 +142,14 @@ def _segment_search_tokens(segment: str, segment_type: str) -> list[str]:
     return [t for t in tokens if t]
 
 
+def _regex_or_clauses(field_names: tuple[str, ...], tokens: list[str]) -> list[dict]:
+    clauses: list[dict] = []
+    for field in field_names:
+        for token in tokens:
+            clauses.append({field: {"$regex": rf"\b{re.escape(token)}\b", "$options": "i"}})
+    return clauses
+
+
 def segment_to_mongo_clause(segment: str) -> dict:
     """Indexed token query with compact field fallback for older synced docs."""
     parts = [p.strip() for p in segment.split("||") if p.strip()]
@@ -141,6 +158,8 @@ def segment_to_mongo_clause(segment: str) -> dict:
 
     segment_type = classify_segment(segment)
     tokens = _segment_search_tokens(segment, segment_type)
+    if segment_type == "color" and len(parts) == 1:
+        tokens = color_search_terms(parts[0])
     if not tokens:
         return {}
 
@@ -152,6 +171,17 @@ def segment_to_mongo_clause(segment: str) -> dict:
         clauses.append({"search_tokens": {"$all": tokens}})
     elif segment_type == "multicolor":
         clauses.append({"search_tokens": {"$in": list(dict.fromkeys(tokens))}})
+    elif segment_type == "color":
+        unique_tokens = list(dict.fromkeys(tokens))
+        clauses.append({"search_tokens": {"$in": unique_tokens}})
+        clauses.extend(_regex_or_clauses(COLOR_RAW_FIELDS, unique_tokens))
+    elif segment_type == "pattern":
+        unique_tokens = list(dict.fromkeys(tokens))
+        if len(unique_tokens) == 1:
+            clauses.append({"search_tokens": unique_tokens[0]})
+        else:
+            clauses.append({"search_tokens": {"$in": unique_tokens}})
+        clauses.extend(_regex_or_clauses(PATTERN_RAW_FIELDS, unique_tokens))
     elif len(tokens) == 1:
         clauses.append({"search_tokens": tokens[0]})
     else:
@@ -162,7 +192,7 @@ def segment_to_mongo_clause(segment: str) -> dict:
     for field in compact_fields:
         for token in tokens:
             regex_clauses.append({field: {"$regex": re.escape(token), "$options": "i"}})
-    if regex_clauses:
+    if regex_clauses and segment_type not in {"color", "pattern"}:
         clauses.append({"$or": regex_clauses})
 
     return {"$or": clauses} if len(clauses) > 1 else clauses[0]
@@ -209,7 +239,7 @@ def part_matches_product(product: dict, part: str, segment_type: str) -> bool:
         return False
 
     if segment_type == "color":
-        return product_matches_color_terms(product, {part_lower})
+        return product_matches_color_terms(product, set(color_search_terms(part)))
 
     if segment_type == "shape":
         return shape_field_matches(part_lower, str(product.get("Shape") or ""))

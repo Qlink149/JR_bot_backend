@@ -12,6 +12,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     SHAPE_ALIASES,
     SIZE_PATTERN,
     WEIGHT_PATTERN,
+    color_search_terms,
 )
 from qlink_chatbot.utils.jr_search_currency import extract_price_filter_from_text
 from qlink_chatbot.utils.jr_search_sizes import (
@@ -144,10 +145,7 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
         return
 
     if key in COLOR_ALIASES:
-        attribute_filters["color"].add(key)
-        expansion = COLOR_ALIASES[key]
-        if "||" not in expansion:
-            attribute_filters["color"].add(expansion.lower())
+        attribute_filters["color"].update(color_search_terms(key))
         return
 
     if key in SHAPE_ALIASES:
@@ -253,10 +251,7 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         if key in MULTICOLOR_KEYS:
             pass
         elif key in COLOR_ALIASES:
-            color_check_terms.add(key)
-            expansion = COLOR_ALIASES[key]
-            if "||" not in expansion:
-                color_check_terms.add(expansion.lower())
+            color_check_terms.update(color_search_terms(key))
         elif "||" in segment:
             for part in segment.split("||"):
                 part_key = part.strip().lower()

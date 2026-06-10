@@ -77,11 +77,18 @@ def build_search_tokens(product: dict) -> list[str]:
 
 
 def backfill_search_tokens(batch_size: int = 500) -> dict:
-    """Add search_tokens to existing product docs (run once after deploy)."""
+    """Add or rebuild search_tokens on product docs missing a usable token index."""
     ensure_product_search_indexes()
     updated = 0
     cursor = products_collection.find(
-        {"search_tokens": {"$exists": False}, "raw": {"$exists": True}},
+        {
+            "raw": {"$exists": True},
+            "$or": [
+                {"search_tokens": {"$exists": False}},
+                {"search_tokens": None},
+                {"search_tokens": {"$size": 0}},
+            ],
+        },
         {"raw": 1},
         max_time_ms=20_000,
     ).limit(batch_size)
@@ -95,7 +102,14 @@ def backfill_search_tokens(batch_size: int = 500) -> dict:
         )
         updated += 1
     remaining = products_collection.count_documents(
-        {"search_tokens": {"$exists": False}, "raw": {"$exists": True}}
+        {
+            "raw": {"$exists": True},
+            "$or": [
+                {"search_tokens": {"$exists": False}},
+                {"search_tokens": None},
+                {"search_tokens": {"$size": 0}},
+            ],
+        }
     )
     return {"updated": updated, "remaining_without_tokens": remaining}
 

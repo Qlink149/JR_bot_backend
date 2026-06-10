@@ -108,6 +108,7 @@ SEARCH_CASES = [
     ("Color: red AND gold",                 "red&gold",                     "91", ""),
     ("Color: pink rugs",                    "pink",                         "91", ""),
     ("Color: pink (natural language)",      "Show me pink rugs",            "91", ""),
+    ("Pattern: solid beige",                "show me solid beige rugs",     "91", ""),
 
     # ── Edge / stress ──────────────────────────────────────────────────────
     ("Edge: under INR500 (no results?)",      "under INR 500",                "91", ""),
