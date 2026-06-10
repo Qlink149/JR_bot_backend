@@ -15,10 +15,11 @@ R2_ACCOUNT_ENDPOINT = (
     )
     or ""
 ).strip()
+# r2.dev public URLs are bucket-scoped — object keys must NOT repeat the bucket name.
 R2_PUBLIC_BASE = (
     os.environ.get(
         "R2_PUBLIC_BASE",
-        "https://pub-706af74a9f2443aa9e89918b8fd710b9.r2.dev/jr-chatbot",
+        "https://pub-706af74a9f2443aa9e89918b8fd710b9.r2.dev",
     )
     or ""
 ).strip()
@@ -78,7 +79,11 @@ def _s3_client():
 
 
 def public_url_for_key(key: str) -> str:
-    return f"{R2_PUBLIC_BASE.rstrip('/')}/{key.lstrip('/')}"
+    base = R2_PUBLIC_BASE.rstrip("/")
+    # Guard against misconfigured env that duplicates the bucket segment in the path.
+    if R2_BUCKET and base.endswith(f"/{R2_BUCKET}"):
+        base = base[: -len(f"/{R2_BUCKET}")]
+    return f"{base}/{key.lstrip('/')}"
 
 
 def upload_object_bytes(key: str, body: bytes, content_type: str) -> str:

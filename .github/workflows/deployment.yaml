@@ -102,7 +102,7 @@ jobs:
                 -e R2_SECRET_KEY="${{ env.R2_SECRET_KEY }}" \
                 -e R2_BUCKET="${{ vars.R2_BUCKET || 'jr-chatbot' }}" \
                 -e R2_ACCOUNT_ENDPOINT="${{ vars.R2_ACCOUNT_ENDPOINT || 'https://b166538fe6434f1c027568fda8861597.r2.cloudflarestorage.com' }}" \
-                -e R2_PUBLIC_BASE="${{ vars.R2_PUBLIC_BASE || 'https://pub-706af74a9f2443aa9e89918b8fd710b9.r2.dev/jr-chatbot' }}" \
+                -e R2_PUBLIC_BASE="${{ vars.R2_PUBLIC_BASE || 'https://pub-706af74a9f2443aa9e89918b8fd710b9.r2.dev' }}" \
                 -e BEHIND_PROXY_CORS="true" \
                 -e APP_CORS_ENABLED="false" \
                 -e WHAPI_TOKEN="${{ secrets.WHAPI_TOKEN }}" \
