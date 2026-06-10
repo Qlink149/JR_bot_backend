@@ -16,6 +16,8 @@ jobs:
       VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || vars.VPS_PASSWORD }}
       APP_DIR: ${{ vars.APP_DIR || '/opt/jr_bot_backend' }}
       IMAGE_NAME: ${{ vars.IMAGE_NAME || 'jr_backend:latest' }}
+      R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY || vars.R2_ACCESS_KEY }}
+      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY || vars.R2_SECRET_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,6 +40,16 @@ jobs:
             printf ' - %s\n' "${missing[@]}"
             exit 1
           fi
+
+      - name: Validate R2 credentials for deploy
+        run: |
+          if [ -z "${{ env.R2_ACCESS_KEY }}" ] || [ -z "${{ env.R2_SECRET_KEY }}" ]; then
+            echo "::error::R2_ACCESS_KEY or R2_SECRET_KEY is empty."
+            echo "Add them in GitHub → Qlink149/JR_bot_backend → Settings → Secrets and variables → Actions"
+            echo "Secret names must be exactly: R2_ACCESS_KEY and R2_SECRET_KEY"
+            exit 1
+          fi
+          echo "R2 credentials present for deploy (values hidden)."
 
       - name: Build and deploy on VPS
         uses: appleboy/ssh-action@master
@@ -63,9 +75,9 @@ jobs:
               cd "$APP_DIR"
             fi
 
-            if [ -z "${{ secrets.R2_ACCESS_KEY }}" ] || [ -z "${{ secrets.R2_SECRET_KEY }}" ]; then
-              echo "WARNING: R2_ACCESS_KEY or R2_SECRET_KEY GitHub secret is empty."
-              echo "Chat image upload will fail until these secrets are configured."
+            if [ -z "${{ env.R2_ACCESS_KEY }}" ] || [ -z "${{ env.R2_SECRET_KEY }}" ]; then
+              echo "ERROR: R2_ACCESS_KEY or R2_SECRET_KEY is empty in the deploy job."
+              exit 1
             fi
 
             DOCKER_BUILDKIT=1 docker build -t "$IMAGE_NAME" .
@@ -86,8 +98,11 @@ jobs:
                 -e DEFAULT_COUNTRY_CODE="${{ secrets.DEFAULT_COUNTRY_CODE }}" \
                 -e ENV_MODE="${{ secrets.ENV_MODE }}" \
                 -e PINECONE_API="${{ secrets.PINECONE_API }}" \
-                -e R2_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY }}" \
-                -e R2_SECRET_KEY="${{ secrets.R2_SECRET_KEY }}" \
+                -e R2_ACCESS_KEY="${{ env.R2_ACCESS_KEY }}" \
+                -e R2_SECRET_KEY="${{ env.R2_SECRET_KEY }}" \
+                -e R2_BUCKET="${{ vars.R2_BUCKET || 'jr-chatbot' }}" \
+                -e R2_ACCOUNT_ENDPOINT="${{ vars.R2_ACCOUNT_ENDPOINT || 'https://b166538fe6434f1c027568fda8861597.r2.cloudflarestorage.com' }}" \
+                -e R2_PUBLIC_BASE="${{ vars.R2_PUBLIC_BASE || 'https://pub-706af74a9f2443aa9e89918b8fd710b9.r2.dev/jr-chatbot' }}" \
                 -e BEHIND_PROXY_CORS="true" \
                 -e APP_CORS_ENABLED="false" \
                 -e WHAPI_TOKEN="${{ secrets.WHAPI_TOKEN }}" \
@@ -138,6 +153,9 @@ jobs:
               docker logs qlink || true
               exit 1
             fi
+
+            echo "R2 status from /ping:"
+            curl -sf "http://127.0.0.1:8000/ping" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('r2', {}), indent=2))" || true
 
       - name: Cleanup
         uses: appleboy/ssh-action@master

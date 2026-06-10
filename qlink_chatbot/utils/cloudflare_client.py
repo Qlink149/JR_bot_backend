@@ -22,25 +22,41 @@ R2_PUBLIC_BASE = (
     )
     or ""
 ).strip()
-R2_ACCESS_KEY = (os.environ.get("R2_ACCESS_KEY") or "").strip()
-R2_SECRET_KEY = (os.environ.get("R2_SECRET_KEY") or "").strip()
 
 
 class R2NotConfiguredError(RuntimeError):
     """Raised when R2 credentials or bucket settings are missing."""
 
 
+def _r2_credentials() -> tuple[str, str]:
+    access_key = (os.environ.get("R2_ACCESS_KEY") or "").strip()
+    secret_key = (os.environ.get("R2_SECRET_KEY") or "").strip()
+    return access_key, secret_key
+
+
+def r2_status() -> dict[str, bool]:
+    access_key, secret_key = _r2_credentials()
+    return {
+        "configured": bool(access_key and secret_key and R2_ACCOUNT_ENDPOINT and R2_BUCKET),
+        "access_key_set": bool(access_key),
+        "secret_key_set": bool(secret_key),
+        "bucket_set": bool(R2_BUCKET),
+        "endpoint_set": bool(R2_ACCOUNT_ENDPOINT),
+    }
+
+
 def r2_is_configured() -> bool:
-    return bool(R2_ACCESS_KEY and R2_SECRET_KEY and R2_ACCOUNT_ENDPOINT and R2_BUCKET)
+    return r2_status()["configured"]
 
 
 def _require_r2_configured() -> None:
+    access_key, secret_key = _r2_credentials()
     if r2_is_configured():
         return
     missing = []
-    if not R2_ACCESS_KEY:
+    if not access_key:
         missing.append("R2_ACCESS_KEY")
-    if not R2_SECRET_KEY:
+    if not secret_key:
         missing.append("R2_SECRET_KEY")
     if not R2_ACCOUNT_ENDPOINT:
         missing.append("R2_ACCOUNT_ENDPOINT")
@@ -49,14 +65,16 @@ def _require_r2_configured() -> None:
     raise R2NotConfiguredError(f"Missing R2 configuration: {', '.join(missing)}")
 
 
-s3 = boto3.client(
-    "s3",
-    endpoint_url=R2_ACCOUNT_ENDPOINT,
-    aws_access_key_id=R2_ACCESS_KEY or None,
-    aws_secret_access_key=R2_SECRET_KEY or None,
-    region_name="auto",
-    config=Config(signature_version="s3v4"),
-)
+def _s3_client():
+    access_key, secret_key = _r2_credentials()
+    return boto3.client(
+        "s3",
+        endpoint_url=R2_ACCOUNT_ENDPOINT,
+        aws_access_key_id=access_key or None,
+        aws_secret_access_key=secret_key or None,
+        region_name="auto",
+        config=Config(signature_version="s3v4"),
+    )
 
 
 def public_url_for_key(key: str) -> str:
@@ -66,7 +84,7 @@ def public_url_for_key(key: str) -> str:
 def upload_object_bytes(key: str, body: bytes, content_type: str) -> str:
     _require_r2_configured()
     try:
-        s3.put_object(
+        _s3_client().put_object(
             Bucket=R2_BUCKET,
             Key=key,
             Body=body,
@@ -84,7 +102,7 @@ def generate_presigned_put_url(key: str, content_type: str, expires_in: int = 60
         "Key": key,
         "ContentType": content_type,
     }
-    return s3.generate_presigned_url(
+    return _s3_client().generate_presigned_url(
         ClientMethod="put_object",
         Params=params,
         ExpiresIn=expires_in,

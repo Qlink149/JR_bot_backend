@@ -14,6 +14,7 @@ from qlink_chatbot.routes.whatsapp_routes import whatsapp_router
 from qlink_chatbot.routes.ws_routes import (
     ws_router,
 )
+from qlink_chatbot.utils.cloudflare_client import r2_status
 from qlink_chatbot.utils.logger_config import logger
 
 DEFAULT_CORS_ORIGINS = [
@@ -154,6 +155,7 @@ def ping():
             "app_cors_enabled": is_app_cors_enabled(),
             "behind_proxy_cors": is_behind_proxy_cors(),
         },
+        "r2": r2_status(),
     }
 
 logger.info("Jaipur Rugs backend initialized successfully.")
