@@ -219,29 +219,49 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
         rf"\b{amount_core}{amount_suffix}\s*({alias_pattern})\b",
         rf"\b{amount_core}{amount_suffix}\b",
     ]
+    def _unpack_price_match(idx: int, groups: tuple) -> tuple[str, str, str, str]:
+        """Map regex groups to operator, currency, amount, suffix."""
+        n = len(groups)
+        if idx == 0:
+            return (
+                groups[0] if n > 0 else "",
+                groups[1] if n > 1 else "",
+                groups[2] if n > 2 else "",
+                groups[3] if n > 3 else "",
+            )
+        if idx == 1:
+            return (
+                groups[0] if n > 0 else "",
+                groups[2] if n > 2 else "",
+                groups[1] if n > 1 else "",
+                groups[3] if n > 3 else "",
+            )
+        if idx == 2:
+            return (
+                groups[0] if n > 0 else "",
+                groups[1] if n > 1 else "",
+                groups[2] if n > 2 else "",
+                groups[3] if n > 3 else "",
+            )
+        if idx == 3:
+            return (
+                groups[2] if n > 2 else "budget",
+                groups[0] if n > 0 else "",
+                groups[1] if n > 1 else "",
+                groups[3] if n > 3 else "",
+            )
+        if idx == 4:
+            return ("budget", groups[0] if n > 0 else "", groups[1] if n > 1 else "", "")
+        if idx == 5:
+            return ("budget", groups[1] if n > 1 else "", groups[0] if n > 0 else "", "")
+        return ("budget", DEFAULT_CURRENCY, groups[0] if n > 0 else "", groups[1] if n > 1 else "")
+
     for idx, pattern in enumerate(patterns):
         m = re.search(pattern, text)
         if not m:
             continue
         groups = m.groups()
-        if idx == 0:
-            op, cur, at, sf = groups[0], groups[1], groups[2], groups[3] if len(groups) > 3 else ""
-        elif idx == 1:
-            op, at, sf, cur = groups
-        elif idx == 2:
-            op, cur, at, sf = groups
-        elif idx == 3:
-            cur, at, sf, op = groups
-        elif idx == 4:
-            cur, at, sf = groups
-            op = "budget"
-        elif idx == 5:
-            at, sf, cur = groups
-            op = "budget"
-        else:
-            at, sf = groups[0], groups[1] if len(groups) > 1 else ""
-            cur = DEFAULT_CURRENCY
-            op = "budget"
+        op, cur, at, sf = _unpack_price_match(idx, groups)
 
         parsed = _parse_amount_with_suffix(at, sf or "")
         if not cur and not _is_probable_price_amount(

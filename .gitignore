@@ -3,6 +3,8 @@
 Thumbs.db
 
 # Logs and temp files
+logs/
+data/policies_scrape.json
 *.log
 *.tmp
 *.lock
