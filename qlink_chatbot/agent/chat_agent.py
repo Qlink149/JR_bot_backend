@@ -804,8 +804,9 @@ async def chat_agent(
                 "content": (
                     "The user attached an image in this message — you CAN view it (provided as input_image). "
                     "Never say you cannot view attachments or images. For custom/bespoke rug requests, "
-                    "describe the design you see, confirm custom rugs are available, and ask for delivery "
-                    "location plus any missing size or material details."
+                    "describe the design you see, confirm custom rugs are available, share shop@jaipurrugs.com "
+                    "and +91 7665017083 for custom-rug help, and ask for delivery location plus any missing "
+                    "size or material details."
                 ),
             })
 
