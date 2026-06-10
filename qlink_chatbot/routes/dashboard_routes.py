@@ -711,6 +711,7 @@ def _website_product_sync_doc(product: dict) -> dict | None:
 
 def _bulk_sync_website_products(products: list[dict]) -> dict:
     from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
+    from qlink_chatbot.utils.jr_search_color_breakdown import load_breakdown_colors_for_sku
 
     ensure_product_search_indexes()
     synced = 0
@@ -728,6 +729,9 @@ def _bulk_sync_website_products(products: list[dict]) -> dict:
         if not doc:
             skipped += 1
             continue
+        sku = doc.get("SKU")
+        if sku:
+            doc["breakdown_colors"] = load_breakdown_colors_for_sku(str(sku))
         operations.append(
             UpdateOne(
                 {"BarCode": doc["BarCode"]},

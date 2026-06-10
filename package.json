@@ -1,0 +1,23 @@
+{
+  "name": "jr_bot_backend",
+  "version": "1.0.0",
+  "description": "FastAPI backend for the Jaipur Rugs chatbot — serves both the Web channel (WebSocket) and WhatsApp channel (Gupshup webhook) from a single Vultr server using the same AI core.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Qlink149/JR_bot_backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Qlink149/JR_bot_backend/issues"
+  },
+  "homepage": "https://github.com/Qlink149/JR_bot_backend#readme"
+}

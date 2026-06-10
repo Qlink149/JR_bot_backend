@@ -240,6 +240,54 @@ def delete_record_by_id(record_id: str, namespace: str = pinecone_kb_namespace):
         logger.error(f"[Pinecone] Error deleting records: {e}")
 
 
+def list_all_record_ids(
+    prefix: str = "",
+    namespace: str = pinecone_kb_namespace,
+) -> list[str]:
+    """List all vector IDs in a namespace, optionally filtered by prefix."""
+    pine_index = get_index()
+    if not pine_index:
+        logger.warning("[Pinecone] PINECONE_API/PINECONE_API_KEY is not configured.")
+        return []
+
+    ids: list[str] = []
+    try:
+        for batch in pine_index.list(prefix=prefix, namespace=namespace):
+            if isinstance(batch, (list, tuple)):
+                ids.extend(str(item) for item in batch)
+            elif isinstance(batch, str):
+                ids.append(batch)
+    except TypeError:
+        response = list(pine_index.list(namespace=namespace))
+        for batch in response:
+            if isinstance(batch, (list, tuple)):
+                ids.extend(str(item) for item in batch if str(item).startswith(prefix))
+    return ids
+
+
+def delete_records_by_prefix(
+    prefix: str,
+    namespace: str = pinecone_kb_namespace,
+    batch_size: int = 100,
+) -> int:
+    """Delete all records whose IDs start with prefix."""
+    pine_index = get_index()
+    if not pine_index:
+        logger.warning("[Pinecone] PINECONE_API/PINECONE_API_KEY is not configured.")
+        return 0
+
+    ids = list_all_record_ids(prefix=prefix, namespace=namespace)
+    deleted = 0
+    for offset in range(0, len(ids), batch_size):
+        batch = ids[offset:offset + batch_size]
+        if not batch:
+            continue
+        pine_index.delete(ids=batch, namespace=namespace)
+        deleted += len(batch)
+    logger.info(f"[Pinecone] Deleted {deleted} record(s) with prefix '{prefix}'.")
+    return deleted
+
+
 def chunk_text(text: str, max_length: int = 1000, overlap: int = 100):
     """Smart text chunking that tries to preserve sentence boundaries.
     """

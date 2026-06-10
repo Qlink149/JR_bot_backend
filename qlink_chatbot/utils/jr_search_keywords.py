@@ -146,6 +146,7 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
 
     if key in COLOR_ALIASES:
         attribute_filters["color"].update(color_search_terms(key))
+        attribute_filters["color_exact"].add(key)
         return
 
     if key in SHAPE_ALIASES:
@@ -200,8 +201,9 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
     pending_segments: list[str] = []
     clean_segments = []
     color_check_terms: set[str] = set()
+    exact_color_terms: set[str] = set()
     attribute_filters: dict[str, set] = {
-        "color": set(), "shape": set(), "size": set(), "size_cm": set(),
+        "color": set(), "color_exact": set(), "shape": set(), "size": set(), "size_cm": set(),
         "material": set(), "construction": set(), "pattern": set(),
         "room": set(), "weight_max": set(), "multicolor": set(),
     }
@@ -252,14 +254,20 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
             pass
         elif key in COLOR_ALIASES:
             color_check_terms.update(color_search_terms(key))
+            exact_color_terms.add(key)
         elif "||" in segment:
             for part in segment.split("||"):
                 part_key = part.strip().lower()
                 if part_key:
                     color_check_terms.add(part_key)
+                    exact_color_terms.add(part_key)
 
     if not color_check_terms and attribute_filters["color"]:
         color_check_terms = set(attribute_filters["color"])
+    if not exact_color_terms and attribute_filters["color_exact"]:
+        exact_color_terms = set(attribute_filters["color_exact"])
+
+    attribute_filters["color_exact"] = exact_color_terms
 
     return overall_price_filter, "&".join(clean_segments), color_check_terms, attribute_filters
 

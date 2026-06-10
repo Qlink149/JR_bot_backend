@@ -138,6 +138,27 @@ def _is_probable_price_amount(amount: float, suffix: str, context: str) -> bool:
     return any(w in context.split() for w in PRICE_CONTEXT_WORDS)
 
 
+def _infer_thousand_range(min_a: float, max_a: float) -> tuple[float, float]:
+    """Treat shorthand like '20 to 30,000' as 20k–30k for common budget phrasing."""
+    low, high = min(min_a, max_a), max(min_a, max_a)
+    if low < 1000 and high >= 1000 and low * 1000 <= high * 1.5:
+        return low * 1000, high
+    return low, high
+
+
+def price_filter_to_keyword(price_filter: dict) -> str:
+    currency = normalize_currency_code(price_filter.get("currency", DEFAULT_CURRENCY))
+    if "min_amount" in price_filter and "max_amount" in price_filter:
+        min_a = int(price_filter["min_amount"])
+        max_a = int(price_filter["max_amount"])
+        return f"between {currency} {min_a} to {currency} {max_a}"
+    amount = int(price_filter["amount"])
+    operator = price_filter.get("operator", "$lte")
+    if operator == "$gte":
+        return f"above {currency} {amount}"
+    return f"under {currency} {amount}"
+
+
 def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
     """Return (price_filter, cleaned_text_without_price)."""
     alias_pattern = _currency_alias_pattern()
@@ -154,18 +175,40 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
         text,
     )
     if range_match:
-        fc, min_t, min_s, sc, max_t, max_s = range_match.groups()
-        min_a = _parse_amount_with_suffix(min_t, min_s or "")
-        max_a = _parse_amount_with_suffix(max_t, max_s or min_s or "")
+        fc, min_t, sc, max_t = range_match.groups()
+        min_a, max_a = _infer_thousand_range(
+            _parse_amount_with_suffix(min_t, ""),
+            _parse_amount_with_suffix(max_t, ""),
+        )
         currency = fc or sc or DEFAULT_CURRENCY
         return (
             {
                 "currency": normalize_currency_code(currency),
-                "min_amount": min(min_a, max_a),
-                "max_amount": max(min_a, max_a),
+                "min_amount": min_a,
+                "max_amount": max_a,
             },
             (text[:range_match.start()] + " " + text[range_match.end():]).strip(),
         )
+
+    plain_range = re.search(
+        rf"(?:\b(?:around|about|approximately)\s+)?{amount}\s+(?:and|to|-)\s+{amount}\b",
+        text,
+    )
+    if plain_range:
+        min_t, max_t = plain_range.groups()
+        min_a, max_a = _infer_thousand_range(
+            _parse_amount_with_suffix(min_t, ""),
+            _parse_amount_with_suffix(max_t, ""),
+        )
+        if _is_probable_price_amount(min_a, "", text) or _is_probable_price_amount(max_a, "", text):
+            return (
+                {
+                    "currency": DEFAULT_CURRENCY,
+                    "min_amount": min_a,
+                    "max_amount": max_a,
+                },
+                (text[:plain_range.start()] + " " + text[plain_range.end():]).strip(),
+            )
 
     patterns = [
         rf"\b({operators})\b\s+({alias_pattern})\s+{amount_core}{amount_suffix}\b",

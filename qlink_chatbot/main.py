@@ -67,6 +67,8 @@ def is_app_cors_enabled() -> bool:
     """App-level CORS is for local/dev only. Production Vultr nginx already sets CORS."""
     if is_behind_proxy_cors():
         return False
+    if os.getenv("ENV_MODE", "").strip().lower() == "dev":
+        return True
     return os.getenv("APP_CORS_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -157,5 +159,23 @@ def ping():
         },
         "r2": r2_status(),
     }
+
+@app.on_event("startup")
+def warmup_search_caches() -> None:
+    import threading
+
+    def _warmup() -> None:
+        try:
+            from qlink_chatbot.utils.jr_search_color_breakdown import ensure_breakdown_colors_backfilled
+            from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
+
+            ensure_product_search_indexes()
+            ensure_breakdown_colors_backfilled()
+            logger.info("[STARTUP] product search caches warmed")
+        except Exception as err:
+            logger.warning(f"[STARTUP] product search warmup failed: {err}")
+
+    threading.Thread(target=_warmup, daemon=True, name="search-warmup").start()
+
 
 logger.info("Jaipur Rugs backend initialized successfully.")

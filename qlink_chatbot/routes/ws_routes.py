@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pymongo import MongoClient
@@ -24,6 +25,19 @@ db = client["JR"]
 sessions_collection = db["users"]
 
 ws_router = APIRouter()
+
+_IMAGE_MARKDOWN_RE = re.compile(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", re.IGNORECASE)
+
+
+def _extract_image_url(msg: dict) -> str:
+    for key in ("image_url", "image", "imageUrl", "attachment_url"):
+        value = str(msg.get(key) or "").strip()
+        if value:
+            return value
+    content = str(msg.get("content") or "")
+    match = _IMAGE_MARKDOWN_RE.search(content)
+    return match.group(1) if match else ""
+
 
 active_connections: dict[str, dict[str, any]] = {}
 admin_connections: set[WebSocket] = set()
@@ -98,7 +112,7 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
             if msg.get("from") != "user":
                 continue
 
-            image_url = msg.get("image_url") or msg.get("image") or msg.get("imageUrl") or msg.get("attachment_url") or ""
+            image_url = _extract_image_url(msg)
             message = {
                 "type": "message",
                 "from": "user",
@@ -120,16 +134,27 @@ async def user_ws(websocket: WebSocket, session_id: str, country_code: str, name
                 detected_currency = currency_for_country(resolved_country) or geo.get("currency", "INR")
                 logger.info(f"[WEB-IN] session={session_id} country={resolved_country} currency={detected_currency} image={'yes' if image_url else 'no'} msg={message['content']!r}")
                 debug_tool_calls = []
-                response = await chat_agent(
-                    chat_history=session.get("chat_history", []),
-                    user_message=message["content"],
-                    session_id=session_id,
-                    country_code=resolved_country,
-                    client_ip=client_ip,
-                    detected_currency=detected_currency,
-                    debug_collector=debug_tool_calls,
-                    image_url=image_url,
-                )
+                response = None
+                try:
+                    response = await chat_agent(
+                        chat_history=session.get("chat_history", []),
+                        user_message=message["content"],
+                        session_id=session_id,
+                        country_code=resolved_country,
+                        client_ip=client_ip,
+                        detected_currency=detected_currency,
+                        debug_collector=debug_tool_calls,
+                        image_url=image_url,
+                    )
+                except Exception as agent_err:
+                    logger.error(
+                        f"chat_agent failed for {session_id}: {agent_err}",
+                        exc_info=True,
+                    )
+                    response = (
+                        "Sorry, something went wrong while preparing your reply. "
+                        "Please try sending your message again."
+                    )
                 logger.info(f"[WEB-OUT] session={session_id} reply={response!r}")
 
                 # Assistant stops typing

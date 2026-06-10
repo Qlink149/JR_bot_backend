@@ -21,6 +21,10 @@ db = client["JR"]
 sessions_collection = db["users"]
 whatsapp_sessions_collection = db["users_whatsapp"]
 internal_collection = db["internals"]
+
+_system_prompt_cache = None
+_system_prompt_cache_at = 0.0
+_SYSTEM_PROMPT_TTL = 300
 agent_alerts = db["agent_alerts"]
 agents_profile = db["agents"]
 inventory_cache_collection = db["inventory_cache"]
@@ -109,8 +113,8 @@ def create_session(
             "updated_at": now,
             "user_name": name,
         }
-        if geo:
-            set_fields["geo"] = geo
+        # geo is set only on insert — putting it in both $setOnInsert and $set
+        # causes MongoDB WriteError (path conflict) on upsert.
         session_collection.update_one(
             {"session_id": session_id},
             {
@@ -274,6 +278,8 @@ def save_previous_search(
     
     search_results: List of product dicts returned from Jaipur Rugs API.
     """
+    if not isinstance(search_results, list) or not search_results:
+        return 0
     try:
         now = datetime.utcnow()
         session_collection = _get_sessions_collection(collection_name=collection_name)
@@ -336,10 +342,16 @@ def user_name(session_id: str, collection_name: str = "users"):
         raise e
     
 def return_system_prompt():
-    """Returns system prompt."""
+    """Returns system prompt (cached in-process for 5 minutes)."""
+    global _system_prompt_cache, _system_prompt_cache_at
     try:
+        now = time.time()
+        if _system_prompt_cache is not None and (now - _system_prompt_cache_at) < _SYSTEM_PROMPT_TTL:
+            return _system_prompt_cache
         response = internal_collection.find_one({"category": "system_prompt"}, {"_id": 0})
-        return response if response else None
+        _system_prompt_cache = response if response else None
+        _system_prompt_cache_at = now
+        return _system_prompt_cache
     except Exception as e:
         logger.error("Error Fetching system prompt variables", extra={"error": e})
         raise e
@@ -366,6 +378,9 @@ def update_system_prompt(
         )
 
         if result.modified_count > 0:
+            global _system_prompt_cache, _system_prompt_cache_at
+            _system_prompt_cache = None
+            _system_prompt_cache_at = 0.0
             logger.info("System prompt updated successfully.")
             return {"status": "success", "updated_fields": list(update_fields.keys())}
         else:

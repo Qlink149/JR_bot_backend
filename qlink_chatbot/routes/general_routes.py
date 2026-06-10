@@ -242,7 +242,8 @@ def get_all_users():
 @general_router.get("/users/{session_id}")
 def get_user_by_id(session_id: str):
     try:
-        user = sessions_collection.find_one({"session_id": session_id})
+        normalized_session_id = (session_id or "").lower().strip()
+        user = sessions_collection.find_one({"session_id": normalized_session_id})
         if not user:
             return JSONResponse({"error": "User not found"}, status_code=404)
         user["_id"] = str(user["_id"])

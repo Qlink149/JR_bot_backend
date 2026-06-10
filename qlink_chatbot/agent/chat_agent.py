@@ -21,7 +21,10 @@ from qlink_chatbot.utils.jaipur_rugs_api import (
     normalise_search_keyword,
     resolve_search_keyword,
 )
+from qlink_chatbot.utils.jr_search_currency import price_filter_to_keyword
+from qlink_chatbot.utils.jr_search_keywords import normalise_keyword
 from qlink_chatbot.utils.logger_config import logger
+from qlink_chatbot.utils.product_format import format_product_search_message
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
 
 API_KEY = os.getenv("OPENAI_API_KEY")
@@ -60,7 +63,7 @@ tools = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Search keyword sent to Jaipur Rugs product API. Use '&' to AND multiple attributes (all must match) and '||' to OR alternatives within one attribute. IMPORTANT: for multi-attribute queries use simple terms joined by & — e.g. 'blue&round', 'red&8x10', 'wool&hand knotted'. Do NOT expand colors with || when combining with other attributes. Supported attributes: color, shape (round/oval/square/runner/rectangle), size (8x10), material (wool/silk/jute), construction (hand knotted/hand tufted), style/pattern (modern/geometric/floral), price. Examples: 'beige', 'blue&round', 'red&8x10', 'wool&8x10', 'blue&oval&under INR 50000', 'red||orange' (color OR only). Include price expressions like 'above INR 50000' in the keyword."
+                    "description": "Search keyword sent to Jaipur Rugs product API. Use '&' to AND multiple attributes (all must match) and '||' to OR alternatives within one attribute. IMPORTANT: for multi-attribute queries use simple terms joined by & — e.g. 'blue&round', 'red&8x10', 'wool&hand knotted'. Do NOT expand colors with || when combining with other attributes — pass the user's exact color word; the backend searches GrColor first, then similar shades automatically. Supported attributes: color, shape (round/oval/square/runner/rectangle), size (8x10), material (wool/silk/jute), construction (hand knotted/hand tufted), style/pattern (modern/geometric/floral), price. Examples: 'beige', 'blue&round', 'red&8x10', 'wool&8x10', 'blue&oval&under INR 50000', 'red||orange' (color OR only). Include price expressions like 'above INR 50000' in the keyword."
                 },
                 "currency": {
                     "type": "string",
@@ -148,6 +151,8 @@ def format_recent_products_for_ai(previous_searches, max_products: int = 3) -> s
 
     latest_search = previous_searches[-1] if isinstance(previous_searches, list) else {}
     results = latest_search.get("results", []) if isinstance(latest_search, dict) else []
+    if not isinstance(results, list):
+        results = []
 
     compact_products = []
     for product in results[:max_products]:
@@ -170,6 +175,53 @@ def format_recent_products_for_ai(previous_searches, max_products: int = 3) -> s
         })
 
     return json.dumps(compact_products)
+
+
+def _merge_search_with_previous(
+    keyword: str,
+    user_message: str,
+    previous_searches,
+) -> str:
+    """Combine a price-only refinement with the previous catalog search keyword."""
+    last_keyword = _latest_search_keyword(previous_searches)
+    if not last_keyword:
+        return keyword or user_message
+
+    for source in (keyword, user_message):
+        text = (source or "").strip()
+        if not text:
+            continue
+        price_filter, clean_keyword, _, attribute_filters = normalise_keyword(text)
+        if not price_filter:
+            continue
+
+        catalog_attrs = (
+            "color", "color_exact", "shape", "size", "size_cm",
+            "material", "construction", "pattern", "room", "multicolor",
+        )
+        has_new_catalog_attrs = any(attribute_filters.get(key) for key in catalog_attrs)
+        if has_new_catalog_attrs:
+            return keyword or user_message
+
+        _, last_clean, _, _ = normalise_keyword(last_keyword)
+        price_keyword = price_filter_to_keyword(price_filter)
+        if last_clean:
+            merged = f"{last_clean}&{price_keyword}"
+            logger.info(
+                f"[AGENT-GUARD] merged price refinement keyword={merged!r} "
+                f"from last={last_keyword!r}"
+            )
+            return merged
+        return price_keyword
+
+    return keyword or user_message
+
+
+def _is_price_refinement_followup(user_message: str, previous_searches) -> bool:
+    if not previous_searches or not _latest_search_keyword(previous_searches):
+        return False
+    price_filter, _, _, _ = normalise_keyword(user_message or "")
+    return price_filter is not None
 
 
 def _latest_search_keyword(previous_searches) -> str:
@@ -381,6 +433,28 @@ def agent_alert_tool(alert, sesson_id):
         logger.error("Error occured while using agent alert tool call.")
 
 
+_COULDNT_FIND_REPLY = (
+    "Sorry, I couldn't find that. Should I connect you to a human agent for that?"
+)
+
+
+def _ensure_unknown_query_alert(
+    session_id: str,
+    user_message: str,
+    reply: str,
+    tools_called: list[str] | None = None,
+) -> None:
+    """Raise a dashboard alert when the bot could not answer (safety net)."""
+    if _COULDNT_FIND_REPLY.lower() not in (reply or "").lower():
+        return
+    if "raise_agent_alert" in (tools_called or []):
+        return
+    summary = (user_message or "").strip().replace("\n", " ")[:240]
+    alert = f"Bot could not answer: {summary or 'unknown question'}"
+    logger.info(f"[AGENT-ALERT] auto-raising unknown-query alert session={session_id} alert={alert!r}")
+    agent_alert_tool(alert=alert, sesson_id=session_id)
+
+
 _STORE_KEYWORDS = {
     "store", "stores", "showroom", "showrooms", "retail", "retailer",
     "retailers", "standalone", "offline", "physical", "nearest store",
@@ -454,8 +528,7 @@ def _format_store_response(store_result: dict, limit: int = 3, offset: int = 0) 
 
     if not stores:
         return (
-            "I don't have verified store address or timing details for that location right now. "
-            "Shall I connect you with a sales agent for the correct information?"
+            "Sorry, I couldn't find that. Should I connect you to a human agent for that?"
         )
 
     selected_stores = stores[offset:offset + limit] or stores[:limit]
@@ -478,6 +551,32 @@ def _format_store_response(store_result: dict, limit: int = 3, offset: int = 0) 
         lines.append(f"Source: {source}")
 
     return "\n".join(lines)
+
+
+def _debug_product_rows(products) -> list[dict]:
+    if not isinstance(products, list):
+        return []
+    rows = []
+    for p in products[:3]:
+        reason = p.get("recommendation_reason") or {}
+        rows.append({
+            "name": p.get("name", ""),
+            "SKU": p.get("SKU", ""),
+            "GrColor": p.get("color", ""),
+            "BrColor": p.get("border_color", ""),
+            "ColorFamily": p.get("color_family", ""),
+            "DisplayFilter": p.get("display_filter", ""),
+            "ColorMood": p.get("color_mood", ""),
+            "Pattern": p.get("pattern", ""),
+            "size": p.get("size", ""),
+            "material": p.get("material", ""),
+            "display_price": p.get("display_price", ""),
+            "color_match_method": reason.get("color_match_method"),
+            "color_search_tier": reason.get("color_search_tier"),
+            "breakdown_matched": reason.get("breakdown_matched_percentages"),
+            "why_recommended": reason.get("summary"),
+        })
+    return rows
 
 
 async def _run_product_show_more(
@@ -534,36 +633,14 @@ async def _run_product_show_more(
             "follow_up": "show_more",
             "excluded_skus": sorted(exclude_skus),
             "products_found": len(more_products),
-            "products": [
-                {
-                    "name": p.get("name", ""),
-                    "SKU": p.get("SKU", ""),
-                    "display_price": p.get("display_price", ""),
-                }
-                for p in more_products[:3]
-            ],
+            "products": _debug_product_rows(more_products),
         })
 
-    show_more_response = await client.responses.create(
-        model="gpt-4.1-mini",
-        instructions=system_prompt,
-        input=[
-            {
-                "role": "developer",
-                "content": (
-                    "User asked to see MORE rugs from the same search. "
-                    f"Search keyword: {search_keyword!r}. "
-                    "Do NOT call jaipur_rugs_product_search or search_store_locations. "
-                    f"Format these new products: {json.dumps(more_products)}"
-                ),
-            },
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0,
-        text=output_schema,
+    show_more_response = format_product_search_message(
+        more_products,
+        intro="Here are more rugs I found for you:",
     )
-    output = json.loads(show_more_response.output[0].content[0].text)
-    return output.get("message", "")
+    return show_more_response
 
 
 async def chat_agent(
@@ -629,7 +706,9 @@ async def chat_agent(
                 })
             offset = 3 if _is_store_more_followup(user_message) else 0
             limit = 6 if offset else 3
-            return _format_store_response(store_result, limit=limit, offset=offset)
+            store_reply = _format_store_response(store_result, limit=limit, offset=offset)
+            _ensure_unknown_query_alert(session_id, user_message, store_reply, [])
+            return store_reply
 
         _IST = timezone(timedelta(hours=5, minutes=30))
         _now_ist = datetime.now(_IST)
@@ -647,26 +726,40 @@ async def chat_agent(
                 "content": f"user name: {user_name(session_id=session_id, collection_name=collection_name)}",
             },
             {"role": "developer", "content": "Never produce filler text like 'searching...' or 'one moment please'. If a tool is needed, directly call the tool without any extra wording."},
-            {"role": "developer", "content": "STRICT CONTACT RULE — only use these exact contact details, never any other: Email: shop@jaipurrugs.com | Order tracking: order-update@jaipurrugs.com | India phone: +91 8000295928 | International phone: +91 7412 060 022. Any other phone number (e.g. +91 7665017083, +91 7230005522) must NEVER be shared as a support contact — those are store numbers only."},
+            {"role": "developer", "content": "STRICT CONTACT RULE — use ONLY these customer-service contacts (not store showroom numbers): General: shop@jaipurrugs.com | After-sales / tracking: order-update@jaipurrugs.com, +91 7665017083 | Repair / care / washing / services: rugcare@jaipurrugs.com, +91 9039195506 | India general: +91 8000295928 | International: +91 7412 060 022."},
             {"role": "developer", "content": "When responding: do not add any narrative, status updates, waiting messages, politeness fillers, or redundant sentences. Either answer directly or call a tool directly."},
             {"role": "developer", "content": "In greeting or welcome-style replies, ask the customer what rug size they are looking for. For follow-up size questions after products were shown, answer from Latest shown products context when possible. If the user mentions size but does not identify the product, ask which product they mean and what size they prefer."},
             {"role": "developer", "content": "For ANY question about stores, showrooms, retail locations, physical presence, address, directions, or timing — including 'do you have stores?', 'do we have stores?', 'any retail store?', 'do we have a retail store?', 'where is your nearest store?', 'nearest store', 'is there a store in [city]?', 'where can I see rugs?' — ALWAYS call `search_store_locations` first (use query 'all stores' if no city given). NEVER answer store questions from your own knowledge. Use only the data returned by the tool."},
             {"role": "developer", "content": "STORE FORMAT — when showing store results, format each store exactly like this:\n**[Store Name]**\n- Address: [full address]\n- Phone: [phone]\n- Timing: [timing]\n\nShow up to 3 stores. If more exist, offer to show more. Never combine multiple stores into a single paragraph."},
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
             {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search` in the Price line — copy it verbatim. Do not recalculate, convert, or substitute INR when `display_price` is USD/EUR/GBP/etc. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
-            {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, or any non-product response."},
-            {
-                "role": "user",
-                "content": (
-                    [
-                        {"type": "input_image", "image_url": image_url},
-                        {"type": "input_text", "text": user_message or "What do you see in this image?"},
-                    ]
-                    if image_url
-                    else user_message
-                ),
-            },
+            {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, anti-slip mats/rug pads, or any non-product response."},
+            {"role": "developer", "content": "Jaipur Rugs DOES sell custom anti-slip mats (rug pads/underlays). Never tell the user Jaipur Rugs does not sell anti-slip mats. Do NOT mention pricing for anti-slip mats. For anti-slip mat questions, answer yes and share https://www.jaipurrugs.com/in/know-your-rug/about-rug-pads plus shop@jaipurrugs.com or +91 8000295928 for purchase help."},
+            {"role": "developer", "content": "When you cannot answer from tools or KB (and no special-topic rule applies), ALWAYS call raise_agent_alert with \"Bot could not answer: \" plus a brief summary of the user's question, then respond exactly: \"Sorry, I couldn't find that. Should I connect you to a human agent for that?\" The alert must appear on the admin dashboard for support agents."},
         ]
+
+        if image_url:
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    "The user attached an image in this message — you CAN view it (provided as input_image). "
+                    "Never say you cannot view attachments or images. For custom/bespoke rug requests, "
+                    "describe the design you see, confirm custom rugs are available, and ask for delivery "
+                    "location plus any missing size or material details."
+                ),
+            })
+
+        input_list.append({
+            "role": "user",
+            "content": (
+                [
+                    {"type": "input_image", "image_url": image_url},
+                    {"type": "input_text", "text": user_message or "What do you see in this image?"},
+                ]
+                if image_url
+                else user_message
+            ),
+        })
 
         if previous_searches:
             latest_keyword = _latest_search_keyword(previous_searches)
@@ -690,6 +783,16 @@ async def chat_agent(
                     "This message is a follow-up about previously shown products. "
                     "Answer from Latest shown products context only. "
                     "Do NOT call jaipur_rugs_product_search."
+                ),
+            })
+        elif _is_price_refinement_followup(user_message, previous_searches):
+            merged_keyword = _merge_search_with_previous("", user_message, previous_searches)
+            input_list.append({
+                "role": "developer",
+                "content": (
+                    "This refines the PREVIOUS rug search with a new budget or price range. "
+                    f"You MUST call jaipur_rugs_product_search with keyword={merged_keyword!r}. "
+                    "Do NOT answer from previously shown products only — run a fresh filtered search."
                 ),
             })
         elif _is_new_product_search_request(user_message, chat_history, previous_searches):
@@ -751,15 +854,24 @@ async def chat_agent(
 
         # Step 2: Handle tool calls — collect ALL outputs before calling model again
         has_tool_calls = False
+        tools_called: list[str] = []
+        last_product_search_result = None
+        last_product_search_keyword = ""
         for item in response.output:
             if item.type == "function_call":
                 has_tool_calls = True
+                tools_called.append(item.name)
                 args = json.loads(item.arguments)
                 output = ""
                 logger.info(f"[AGENT-TOOL] session={session_id} tool={item.name} args={args}")
 
                 if item.name == "jaipur_rugs_product_search":
                     keyword = resolve_search_keyword(args, user_message)
+                    keyword = _merge_search_with_previous(
+                        keyword,
+                        user_message,
+                        previous_searches,
+                    )
                     exclude_skus = None
                     if _is_product_show_more_followup(user_message, chat_history, previous_searches):
                         exclude_skus = _shown_skus_from_searches(previous_searches, latest_only=True)
@@ -802,23 +914,10 @@ async def chat_agent(
                             "keyword_sent_to_api": keyword_sent_to_api,
                             "currency": args.get("currency", ""),
                             "products_found": product_count,
-                            "products": [
-                                {
-                                    "name": p.get("name", ""),
-                                    "SKU": p.get("SKU", ""),
-                                    "GrColor": p.get("color", ""),
-                                    "BrColor": p.get("border_color", ""),
-                                    "ColorFamily": p.get("color_family", ""),
-                                    "DisplayFilter": p.get("display_filter", ""),
-                                    "ColorMood": p.get("color_mood", ""),
-                                    "Pattern": p.get("pattern", ""),
-                                    "size": p.get("size", ""),
-                                    "material": p.get("material", ""),
-                                    "display_price": p.get("display_price", ""),
-                                }
-                                for p in (products[:3] if isinstance(products, list) else [])
-                            ],
+                            "products": _debug_product_rows(products),
                         })
+                    last_product_search_result = products
+                    last_product_search_keyword = keyword_sent_to_api or keyword or user_message
                     output = json.dumps(products)
 
                 elif item.name == "save_user_name":
@@ -875,11 +974,16 @@ async def chat_agent(
                 })
 
         # Step 2b: Force product search when the model skipped the tool on a clear search request
-        if (
-            not has_tool_calls
-            and _is_new_product_search_request(user_message, chat_history, previous_searches)
+        if not has_tool_calls and (
+            _is_new_product_search_request(user_message, chat_history, previous_searches)
+            or _is_price_refinement_followup(user_message, previous_searches)
         ):
             keyword = resolve_search_keyword({}, user_message)
+            keyword = _merge_search_with_previous(
+                keyword,
+                user_message,
+                previous_searches,
+            )
             keyword_sent_to_api = normalise_search_keyword(keyword)
             logger.info(
                 f"[AGENT-FORCE-SEARCH] session={session_id} "
@@ -906,32 +1010,22 @@ async def chat_agent(
                     "currency": "",
                     "products_found": product_count,
                     "forced": True,
-                    "products": [
-                        {
-                            "name": p.get("name", ""),
-                            "SKU": p.get("SKU", ""),
-                            "GrColor": p.get("color", ""),
-                            "BrColor": p.get("border_color", ""),
-                            "ColorFamily": p.get("color_family", ""),
-                            "DisplayFilter": p.get("display_filter", ""),
-                            "ColorMood": p.get("color_mood", ""),
-                            "Pattern": p.get("pattern", ""),
-                            "size": p.get("size", ""),
-                            "material": p.get("material", ""),
-                            "display_price": p.get("display_price", ""),
-                        }
-                        for p in (products[:3] if isinstance(products, list) else [])
-                    ],
+                    "products": _debug_product_rows(products),
                 })
-            input_list.append({
-                "role": "developer",
-                "content": (
-                    f"Auto-ran jaipur_rugs_product_search(keyword={keyword_sent_to_api!r}). "
-                    f"Present the results below using the standard product card format. "
-                    f"Results JSON: {json.dumps(products)}"
-                ),
-            })
-            has_tool_calls = True
+            return format_product_search_message(
+                products if isinstance(products, list) else [],
+                no_results_keyword=keyword_sent_to_api or keyword or user_message,
+            )
+
+        if (
+            has_tool_calls
+            and tools_called == ["jaipur_rugs_product_search"]
+            and last_product_search_result is not None
+        ):
+            return format_product_search_message(
+                last_product_search_result if isinstance(last_product_search_result, list) else [],
+                no_results_keyword=last_product_search_keyword,
+            )
 
         # Step 3: Final model response — called ONCE after all tool outputs are collected
         if has_tool_calls:
@@ -945,6 +1039,12 @@ async def chat_agent(
 
         output = json.loads(response.output[0].content[0].text)
         final_message = output.get("message", "")
+        _ensure_unknown_query_alert(
+            session_id,
+            user_message,
+            final_message,
+            tools_called,
+        )
         logger.info(f"[AGENT-OUT] session={session_id} tools_used={has_tool_calls} reply={final_message!r}")
         return final_message
 
