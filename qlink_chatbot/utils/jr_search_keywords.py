@@ -10,6 +10,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     ROOM_KEYWORDS,
     ROUND_SIZE_PATTERN,
     SHAPE_ALIASES,
+    SIZE_CATEGORIES,
     SIZE_PATTERN,
     WEIGHT_PATTERN,
     color_search_terms,
@@ -111,6 +112,11 @@ def preprocess_natural_language(keyword: str) -> str:
             found.append(room)
             remaining = remaining.replace(room, " ").strip()
 
+    for category in sorted(SIZE_CATEGORIES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(category)}\b", remaining):
+            found.append(category)
+            remaining = re.sub(rf"\b{re.escape(category)}\b", " ", remaining).strip()
+
     weight_match = WEIGHT_PATTERN.search(remaining)
     if weight_match:
         found.append(weight_match.group(0).replace(" ", ""))
@@ -159,6 +165,10 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
         attribute_filters["pattern"].add(key)
         return
 
+    if key in SIZE_CATEGORIES:
+        attribute_filters["size_category"].add(key)
+        return
+
     if SIZE_PATTERN.search(key):
         m = SIZE_PATTERN.search(key)
         if m:
@@ -204,6 +214,7 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
     exact_color_terms: set[str] = set()
     attribute_filters: dict[str, set] = {
         "color": set(), "color_exact": set(), "shape": set(), "size": set(), "size_cm": set(),
+        "size_category": set(),
         "material": set(), "construction": set(), "pattern": set(),
         "room": set(), "weight_max": set(), "multicolor": set(),
     }
@@ -285,6 +296,10 @@ def resolve_search_keyword(args: dict | None, user_message: str = "") -> str:
             model_kw = str(value).strip()
             break
 
+    # Tool keyword is authoritative — it includes price/size segments NL preprocess drops.
+    if model_kw:
+        return model_kw
+
     message = (user_message or "").strip()
     if message:
         parsed = preprocess_natural_language(message)
@@ -292,5 +307,6 @@ def resolve_search_keyword(args: dict | None, user_message: str = "") -> str:
             return parsed
         if parsed.strip().lower() != message.strip().lower():
             return parsed
+        return message
 
-    return model_kw or message
+    return ""

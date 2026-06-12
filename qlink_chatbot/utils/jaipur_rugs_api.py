@@ -19,6 +19,7 @@ from qlink_chatbot.utils.jr_search_keywords import (
     normalise_search_keyword,
     resolve_search_keyword,
 )
+from qlink_chatbot.utils.jr_search_llm_extract import resolve_keyword_with_llm_extraction
 from qlink_chatbot.utils.jr_search_mongo import (
     apply_search_pipeline,
     get_instock_products,
@@ -66,22 +67,68 @@ async def jaipur_rugs_product_search(
     country_code: str = "",
     requested_currency: str = "",
     exclude_skus: set | None = None,
+    user_message: str = "",
+    previous_search_keyword: str = "",
+    chat_context: str = "",
+    skip_llm_extraction: bool = False,
+    extraction_debug_out: list | None = None,
 ):
     """Search products from MongoDB (synced Product Master)."""
     try:
         keyword = (keyword or "").strip()
+        llm_extraction_debug = None
+        detected_currency = (
+            normalize_currency_code(requested_currency)
+            if requested_currency
+            else resolve_currency_from_country_code(country_code)
+            or resolve_currency_from_ip(client_ip)
+            or "INR"
+        )
+        keyword, llm_extraction_debug = await resolve_keyword_with_llm_extraction(
+            keyword,
+            user_message=user_message,
+            previous_search_keyword=previous_search_keyword,
+            chat_context=chat_context,
+            skip_llm_extraction=skip_llm_extraction,
+            detected_currency=detected_currency,
+            country_code=country_code,
+        )
+        if extraction_debug_out is not None and llm_extraction_debug is not None:
+            extraction_debug_out.append(llm_extraction_debug)
+        keyword = (keyword or "").strip()
+
+        use_llm_payload = bool(
+            llm_extraction_debug
+            and llm_extraction_debug.get("use_llm_payload")
+            and llm_extraction_debug.get("search_payload")
+        )
+        if use_llm_payload:
+            payload = llm_extraction_debug["search_payload"]
+            price_filter = payload.get("price_filter")
+            clean_keyword = (payload.get("clean_keyword") or "").strip()
+            color_check_terms = payload.get("color_check_terms") or set()
+            attribute_filters = payload.get("attribute_filters") or {}
+            norm_source = "llm_primary_payload"
+        else:
+            price_filter, clean_keyword, color_check_terms, attribute_filters = normalise_keyword(
+                keyword
+            )
+            norm_source = "regex_normalise_keyword"
+
         requested_currency = (
             normalize_currency_code(requested_currency)
             if requested_currency
-            else extract_requested_currency_from_text(keyword)
+            else (price_filter or {}).get("currency")
+            or extract_requested_currency_from_text(keyword)
+            or detected_currency
         )
         logger.info(
             f"[SEARCH] start — keyword={keyword!r} "
             f"requested_currency={requested_currency!r} "
-            f"country_code={country_code!r} client_ip={client_ip!r}"
+            f"country_code={country_code!r} client_ip={client_ip!r} "
+            f"norm_source={norm_source}"
+            + (f" llm_extraction={llm_extraction_debug}" if llm_extraction_debug else "")
         )
-
-        price_filter, clean_keyword, color_check_terms, attribute_filters = normalise_keyword(keyword)
         logger.info(
             f"[SEARCH] normalised — clean_keyword={clean_keyword!r} "
             f"price_filter={price_filter} color_check_terms={color_check_terms} "

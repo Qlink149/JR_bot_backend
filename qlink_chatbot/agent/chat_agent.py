@@ -23,6 +23,7 @@ from qlink_chatbot.utils.jaipur_rugs_api import (
 )
 from qlink_chatbot.utils.jr_search_currency import price_filter_to_keyword
 from qlink_chatbot.utils.jr_search_keywords import normalise_keyword
+from qlink_chatbot.utils.jr_search_llm_extract import serialise_for_json
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.product_format import format_product_search_message
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
@@ -196,7 +197,7 @@ def _merge_search_with_previous(
             continue
 
         catalog_attrs = (
-            "color", "color_exact", "shape", "size", "size_cm",
+            "color", "color_exact", "shape", "size", "size_cm", "size_category",
             "material", "construction", "pattern", "room", "multicolor",
         )
         has_new_catalog_attrs = any(attribute_filters.get(key) for key in catalog_attrs)
@@ -653,6 +654,7 @@ async def _run_product_show_more(
         country_code=country_code,
         requested_currency=detected_currency,
         exclude_skus=exclude_skus or None,
+        skip_llm_extraction=True,
     )
     if isinstance(more_products, dict) and more_products.get("error"):
         return (
@@ -934,6 +936,7 @@ async def chat_agent(
                         previous_searches,
                     )
                     exclude_skus = None
+                    skip_llm_extraction = False
                     if _is_product_show_more_followup(user_message, chat_history, previous_searches):
                         exclude_skus = _shown_skus_from_searches(previous_searches, latest_only=True)
                         last_keyword = _latest_search_keyword(previous_searches)
@@ -942,18 +945,25 @@ async def chat_agent(
                             or keyword.lower().strip() in _PRODUCT_SHOW_MORE_PHRASES
                         ):
                             keyword = last_keyword
+                            skip_llm_extraction = True
                     keyword_sent_to_api = normalise_search_keyword(keyword)
                     if not keyword:
                         logger.warning(
                             f"[AGENT-TOOL] jaipur_rugs_product_search missing keyword "
                             f"— args={args!r} user_message={user_message!r}"
                         )
+                    llm_extract_debug: list = []
                     products = await jaipur_rugs_product_search(
                         keyword,
                         client_ip=client_ip,
                         country_code=country_code,
-                        requested_currency=args.get("currency", ""),
+                        requested_currency=args.get("currency") or detected_currency,
                         exclude_skus=exclude_skus,
+                        user_message=user_message,
+                        previous_search_keyword=_latest_search_keyword(previous_searches),
+                        chat_context=format_recent_chat_for_ai(chat_history, limit=4),
+                        skip_llm_extraction=skip_llm_extraction,
+                        extraction_debug_out=llm_extract_debug,
                     )
                     product_count = len(products) if isinstance(products, list) else 0
                     logger.info(
@@ -968,7 +978,7 @@ async def chat_agent(
                         collection_name=collection_name,
                     )
                     if debug_collector is not None:
-                        debug_collector.append({
+                        tool_debug = {
                             "tool": "jaipur_rugs_product_search",
                             "keyword": keyword_sent_to_api,
                             "keyword_raw": keyword,
@@ -976,7 +986,10 @@ async def chat_agent(
                             "currency": args.get("currency", ""),
                             "products_found": product_count,
                             "products": _debug_product_rows(products),
-                        })
+                        }
+                        if llm_extract_debug:
+                            tool_debug["llm_extraction"] = serialise_for_json(llm_extract_debug[0])
+                        debug_collector.append(tool_debug)
                     last_product_search_result = products
                     last_product_search_keyword = keyword_sent_to_api or keyword or user_message
                     output = json.dumps(products)
@@ -1055,10 +1068,16 @@ async def chat_agent(
                 f"[AGENT-FORCE-SEARCH] session={session_id} "
                 f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r}"
             )
+            llm_extract_debug: list = []
             products = await jaipur_rugs_product_search(
                 keyword,
                 client_ip=client_ip,
                 country_code=country_code,
+                requested_currency=detected_currency,
+                user_message=user_message,
+                previous_search_keyword=_latest_search_keyword(previous_searches),
+                chat_context=format_recent_chat_for_ai(chat_history, limit=4),
+                extraction_debug_out=llm_extract_debug,
             )
             product_count = len(products) if isinstance(products, list) else 0
             save_previous_search(
@@ -1068,7 +1087,7 @@ async def chat_agent(
                 collection_name=collection_name,
             )
             if debug_collector is not None:
-                debug_collector.append({
+                force_debug = {
                     "tool": "jaipur_rugs_product_search",
                     "keyword": keyword_sent_to_api,
                     "keyword_raw": keyword,
@@ -1077,7 +1096,10 @@ async def chat_agent(
                     "products_found": product_count,
                     "forced": True,
                     "products": _debug_product_rows(products),
-                })
+                }
+                if llm_extract_debug:
+                    force_debug["llm_extraction"] = serialise_for_json(llm_extract_debug[0])
+                debug_collector.append(force_debug)
             return format_product_search_message(
                 products if isinstance(products, list) else [],
                 no_results_keyword=keyword_sent_to_api or keyword or user_message,

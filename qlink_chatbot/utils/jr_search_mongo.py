@@ -602,6 +602,25 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
         else:
             return []
 
+    size_category_terms = attribute_filters.get("size_category") or set()
+    if size_category_terms:
+        filtered = []
+        for p in result:
+            haystack = " ".join(
+                str(p.get(field) or "")
+                for field in ("DisplayFilter", "SizeInFT", "MultiFilter")
+            ).lower()
+            if any(re.search(rf"\b{re.escape(term)}\b", haystack) for term in size_category_terms):
+                filtered.append(p)
+        if filtered:
+            logger.info(
+                f"[SEARCH] size_category filter: {len(result)} → {len(filtered)} "
+                f"(terms={size_category_terms})"
+            )
+            result = filtered
+        else:
+            return []
+
     size_cm_terms = attribute_filters.get("size_cm") or set()
     if size_cm_terms:
         filtered = [

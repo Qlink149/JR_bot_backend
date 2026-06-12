@@ -130,6 +130,42 @@ def _parse_amount_with_suffix(amount_text: str, suffix: str = "") -> float:
     return amount * AMOUNT_MULTIPLIERS.get((suffix or "").lower(), 1)
 
 
+_AMOUNT_SUFFIX_RE = re.compile(
+    r"(?<![a-z])(k|thousand|lacs?|lakhs?|lakh|lc|cr|crores?|m|million)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
+def detect_amount_suffix_after_number(text_span: str, amount_text: str) -> str:
+    """Return multiplier suffix (e.g. k, lakh) immediately following amount_text in span."""
+    if not text_span or not amount_text:
+        return ""
+    lower_span = text_span.lower()
+    amt = amount_text.replace(",", "").strip()
+    pos = lower_span.find(amt.lower())
+    if pos < 0:
+        return ""
+    tail = lower_span[pos + len(amt):].lstrip()
+    match = _AMOUNT_SUFFIX_RE.match(tail)
+    return match.group(1).lower() if match else ""
+
+
+def is_price_filter_suspicious(source_text: str, price_filter: dict | None) -> bool:
+    """True when raw text implies k/lakh shorthand but parsed amount looks too small."""
+    if not price_filter or not source_text:
+        return False
+    lower = (source_text or "").lower()
+    if not _AMOUNT_SUFFIX_RE.search(lower):
+        return False
+    if "min_amount" in price_filter and "max_amount" in price_filter:
+        high = max(price_filter["min_amount"], price_filter["max_amount"])
+        if high >= 1000:
+            return False
+        return True
+    amount = float(price_filter.get("amount") or 0)
+    return amount < 1000
+
+
 def _is_probable_price_amount(amount: float, suffix: str, context: str) -> bool:
     if suffix:
         return True
@@ -176,9 +212,12 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
     )
     if range_match:
         fc, min_t, sc, max_t = range_match.groups()
+        span = range_match.group(0)
+        min_sf = detect_amount_suffix_after_number(span, min_t)
+        max_sf = detect_amount_suffix_after_number(span.split(max_t, 1)[-1] if max_t else span, max_t)
         min_a, max_a = _infer_thousand_range(
-            _parse_amount_with_suffix(min_t, ""),
-            _parse_amount_with_suffix(max_t, ""),
+            _parse_amount_with_suffix(min_t, min_sf),
+            _parse_amount_with_suffix(max_t, max_sf),
         )
         currency = fc or sc or DEFAULT_CURRENCY
         return (
@@ -196,9 +235,12 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
     )
     if plain_range:
         min_t, max_t = plain_range.groups()
+        span = plain_range.group(0)
+        min_sf = detect_amount_suffix_after_number(span, min_t)
+        max_sf = detect_amount_suffix_after_number(span.split(max_t, 1)[-1] if max_t else span, max_t)
         min_a, max_a = _infer_thousand_range(
-            _parse_amount_with_suffix(min_t, ""),
-            _parse_amount_with_suffix(max_t, ""),
+            _parse_amount_with_suffix(min_t, min_sf),
+            _parse_amount_with_suffix(max_t, max_sf),
         )
         if _is_probable_price_amount(min_a, "", text) or _is_probable_price_amount(max_a, "", text):
             return (
@@ -262,6 +304,8 @@ def extract_price_filter_from_text(text: str) -> tuple[dict | None, str]:
             continue
         groups = m.groups()
         op, cur, at, sf = _unpack_price_match(idx, groups)
+        if not sf:
+            sf = detect_amount_suffix_after_number(m.group(0), at)
 
         parsed = _parse_amount_with_suffix(at, sf or "")
         if not cur and not _is_probable_price_amount(
