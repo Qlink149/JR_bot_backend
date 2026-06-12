@@ -3,7 +3,7 @@ name: Deploy to VPS
 on:
   push:
     branches:
-      - main
+      - jr-production
   workflow_dispatch:
 
 jobs:
@@ -67,11 +67,11 @@ jobs:
             if [ -d "$APP_DIR/.git" ]; then
               cd "$APP_DIR"
               git remote set-url origin "$CLONE_URL"
-              git fetch origin main
-              git reset --hard origin/main
+              git fetch origin jr-production
+              git reset --hard origin/jr-production
             else
               rm -rf "$APP_DIR"
-              git clone "$CLONE_URL" "$APP_DIR"
+              git clone -b jr-production "$CLONE_URL" "$APP_DIR"
               cd "$APP_DIR"
             fi
 
