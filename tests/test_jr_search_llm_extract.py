@@ -254,6 +254,12 @@ def test_catalog_keyword_excludes_size_categories():
     assert payload["attribute_filters"]["size_category"] == {"medium"}
 
 
+def test_oversized_maps_to_oversize_size_category():
+    _, clean, _, filters = normalise_keyword("pink&oversized")
+    assert clean == "pink"
+    assert filters["size_category"] == {"oversize"}
+
+
 def test_serialise_for_json_converts_sets():
     payload = {"color": {"red"}, "shape": set()}
     out = serialise_for_json(payload)

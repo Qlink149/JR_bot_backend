@@ -23,6 +23,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     ROOM_KEYWORDS,
     SHAPE_ALIASES,
     SIZE_CATEGORIES,
+    normalise_size_category,
     SIZE_PATTERN,
     color_search_terms,
 )
@@ -572,9 +573,10 @@ def validate_extracted_attributes(
 
     for s in raw.get("sizes_ft") or []:
         lower = (s or "").strip().lower()
-        if lower in SIZE_CATEGORIES:
-            if lower not in out["size_categories"]:
-                out["size_categories"].append(lower)
+        canonical = normalise_size_category(lower)
+        if canonical:
+            if canonical not in out["size_categories"]:
+                out["size_categories"].append(canonical)
             continue
         validated = _validate_size_ft(s)
         if validated and validated not in out["sizes_ft"]:
@@ -584,9 +586,10 @@ def validate_extracted_attributes(
 
     for s in raw.get("size_categories") or []:
         lower = (s or "").strip().lower()
-        if lower in SIZE_CATEGORIES and lower not in out["size_categories"]:
-            out["size_categories"].append(lower)
-        elif s:
+        canonical = normalise_size_category(lower)
+        if canonical and canonical not in out["size_categories"]:
+            out["size_categories"].append(canonical)
+        elif s and not canonical:
             dropped.append(f"size_category:{s}")
 
     for s in raw.get("sizes_cm") or []:
@@ -763,7 +766,7 @@ CRITICAL PRICE RULES (read carefully):
 
 CATALOG RULES:
 - Only use colors/shapes/materials from the allowed lists below.
-- size_categories: small, medium, large, oversize (NOT foot dimensions like 8x10).
+- size_categories: small, medium, large, oversize (NOT foot dimensions like 8x10). Map oversized → oversize.
 - Put foot dimensions in sizes_ft (8x10) and size buckets in size_categories (medium).
 - Empty arrays when not mentioned. Do not guess attributes.
 - refinement: refine_previous (modifies prior search), show_more (pagination), else new.

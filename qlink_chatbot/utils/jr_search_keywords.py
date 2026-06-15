@@ -11,9 +11,11 @@ from qlink_chatbot.utils.jr_search_aliases import (
     ROUND_SIZE_PATTERN,
     SHAPE_ALIASES,
     SIZE_CATEGORIES,
+    SIZE_CATEGORY_ALIASES,
     SIZE_PATTERN,
     WEIGHT_PATTERN,
     color_search_terms,
+    normalise_size_category,
 )
 from qlink_chatbot.utils.jr_search_currency import extract_price_filter_from_text
 from qlink_chatbot.utils.jr_search_sizes import (
@@ -112,6 +114,11 @@ def preprocess_natural_language(keyword: str) -> str:
             found.append(room)
             remaining = remaining.replace(room, " ").strip()
 
+    for alias in sorted(SIZE_CATEGORY_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+            found.append(SIZE_CATEGORY_ALIASES[alias])
+            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+
     for category in sorted(SIZE_CATEGORIES, key=len, reverse=True):
         if re.search(rf"\b{re.escape(category)}\b", remaining):
             found.append(category)
@@ -165,8 +172,9 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
         attribute_filters["pattern"].add(key)
         return
 
-    if key in SIZE_CATEGORIES:
-        attribute_filters["size_category"].add(key)
+    cat = normalise_size_category(key)
+    if cat:
+        attribute_filters["size_category"].add(cat)
         return
 
     if SIZE_PATTERN.search(key):
@@ -258,7 +266,7 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
     for segment in pending_segments:
         key = segment.strip().lower()
         track_attribute_terms(key, attribute_filters)
-        if key in SIZE_CATEGORIES:
+        if normalise_size_category(key):
             continue
 
         expanded = expand_term(segment, multi_attribute=multi_attribute)

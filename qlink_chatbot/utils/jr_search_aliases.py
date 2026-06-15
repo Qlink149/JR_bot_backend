@@ -5,6 +5,29 @@ ROUND_SIZE_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*['′]?\s*round\b", re.IGN
 WEIGHT_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*kg\b", re.IGNORECASE)
 MULTICOLOR_KEYS = frozenset({"multicolor", "multi", "multicolour", "colorful", "multi color"})
 SIZE_CATEGORIES = frozenset({"small", "medium", "large", "oversize"})
+SIZE_CATEGORY_ALIASES: dict[str, str] = {
+    "oversized": "oversize",
+    "over-sized": "oversize",
+    "over size": "oversize",
+    "extra-large": "large",
+    "extra large": "large",
+    "xlarge": "large",
+    "x-large": "large",
+    "mid-size": "medium",
+    "mid size": "medium",
+    "midsize": "medium",
+    "mid": "medium",
+}
+
+
+def normalise_size_category(term: str) -> str | None:
+    """Map user/LLM size bucket words to catalog keys (e.g. oversized → oversize)."""
+    key = (term or "").strip().lower()
+    if not key:
+        return None
+    if key in SIZE_CATEGORIES:
+        return key
+    return SIZE_CATEGORY_ALIASES.get(key)
 NOISE_WORDS = {
     "show", "me", "find", "search", "looking", "look", "need", "want",
     "please", "rug", "rugs", "carpet", "carpets", "in", "the", "a", "an",
