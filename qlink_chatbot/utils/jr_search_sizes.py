@@ -6,6 +6,14 @@ CM_PER_FT = 30.48
 CM_PER_IN = 2.54
 CM_SIZE_TOLERANCE = 8
 
+# Approximate area (sq ft) buckets when users say small / medium / large / oversize.
+SIZE_CATEGORY_SQFT_RANGES: dict[str, tuple[float, float]] = {
+    "small": (0.0, 48.0),
+    "medium": (48.0, 120.0),
+    "large": (120.0, 210.0),
+    "oversize": (210.0, float("inf")),
+}
+
 FT_INCH_DIM = re.compile(
     r"(\d+)\s*['′]\s*(\d+)?|(\d+)\s*['′]?(?=[xX*]|$)",
     re.IGNORECASE,
@@ -133,3 +141,34 @@ def product_matches_cm_size(product: dict, size_term: str, *, tolerance: int = C
     if ft_dims and cm_pair_matches(target_w, target_h, ft_dims[0], ft_dims[1], tolerance=tolerance):
         return True
     return False
+
+
+def product_sqft_from_ft_field(value: str) -> float | None:
+    """Estimate rug area in square feet from SizeInFT."""
+    dims_cm = parse_ft_field_to_cm(value)
+    if dims_cm:
+        return (dims_cm[0] / CM_PER_FT) * (dims_cm[1] / CM_PER_FT)
+    text = (value or "").replace("'", "").replace("′", "")
+    match = SIZE_PATTERN.search(text)
+    if match:
+        return float(int(match.group(1)) * int(match.group(2)))
+    return None
+
+
+def product_matches_size_category(product: dict, category: str) -> bool:
+    """Match catalog size buckets (small/medium/large/oversize) by rug area."""
+    cat = (category or "").lower().strip()
+    bounds = SIZE_CATEGORY_SQFT_RANGES.get(cat)
+    if not bounds:
+        return False
+
+    sqft = product_sqft_from_ft_field(str(product.get("SizeInFT") or ""))
+    if sqft is not None:
+        lo, hi = bounds
+        return lo <= sqft < hi
+
+    haystack = " ".join(
+        str(product.get(field) or "")
+        for field in ("DisplayFilter", "SizeInFT", "MultiFilter")
+    ).lower()
+    return bool(re.search(rf"\b{re.escape(cat)}\b", haystack))

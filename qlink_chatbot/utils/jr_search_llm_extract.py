@@ -643,8 +643,6 @@ def attributes_to_catalog_keyword(attrs: dict) -> str:
         segments.append(size)
     for size in attrs.get("sizes_cm") or []:
         segments.append(size)
-    for category in attrs.get("size_categories") or []:
-        segments.append(category)
     for material in attrs.get("materials") or []:
         segments.append(material)
     for construction in attrs.get("constructions") or []:

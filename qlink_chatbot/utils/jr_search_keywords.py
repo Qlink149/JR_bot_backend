@@ -256,10 +256,13 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
     multi_attribute = len(pending_segments) > 1
 
     for segment in pending_segments:
-        expanded = expand_term(segment, multi_attribute=multi_attribute)
-        clean_segments.append(expanded)
         key = segment.strip().lower()
         track_attribute_terms(key, attribute_filters)
+        if key in SIZE_CATEGORIES:
+            continue
+
+        expanded = expand_term(segment, multi_attribute=multi_attribute)
+        clean_segments.append(expanded)
 
         if key in MULTICOLOR_KEYS:
             pass

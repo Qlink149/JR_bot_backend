@@ -34,6 +34,7 @@ from qlink_chatbot.utils.jr_search_sizes import (
     cm_to_ft_keyword_variants,
     parse_requested_cm_size,
     product_matches_cm_size,
+    product_matches_size_category,
 )
 from qlink_chatbot.utils.logger_config import logger
 
@@ -604,14 +605,10 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
 
     size_category_terms = attribute_filters.get("size_category") or set()
     if size_category_terms:
-        filtered = []
-        for p in result:
-            haystack = " ".join(
-                str(p.get(field) or "")
-                for field in ("DisplayFilter", "SizeInFT", "MultiFilter")
-            ).lower()
-            if any(re.search(rf"\b{re.escape(term)}\b", haystack) for term in size_category_terms):
-                filtered.append(p)
+        filtered = [
+            p for p in result
+            if any(product_matches_size_category(p, term) for term in size_category_terms)
+        ]
         if filtered:
             logger.info(
                 f"[SEARCH] size_category filter: {len(result)} → {len(filtered)} "

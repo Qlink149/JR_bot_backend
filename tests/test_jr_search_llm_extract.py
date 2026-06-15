@@ -13,6 +13,7 @@ from qlink_chatbot.utils.jr_search_currency import (
 )
 from qlink_chatbot.utils.jr_search_keywords import normalise_keyword, resolve_search_keyword
 from qlink_chatbot.utils.jr_search_llm_extract import (
+    attributes_to_catalog_keyword,
     attributes_to_keyword_string,
     build_search_payload_from_attrs,
     is_weak_extraction,
@@ -232,6 +233,25 @@ def test_validate_medium_size_category_from_sizes_ft():
     assert attrs["size_categories"] == ["medium"]
     assert attrs["sizes_ft"] == []
     assert "size_ft:medium" not in dropped
+
+
+def test_normalise_keyword_strips_size_category_from_mongo_query():
+    pf, clean, _, filters = normalise_keyword("red&medium&under INR 500000")
+    assert clean == "red"
+    assert filters["size_category"] == {"medium"}
+    assert pf is not None
+    assert pf["amount"] == 500_000
+
+
+def test_catalog_keyword_excludes_size_categories():
+    attrs, _ = validate_extracted_attributes(
+        _v2_raw(colors=["red"], size_categories=["medium"]),
+        source_text="red medium rug",
+    )
+    assert attributes_to_catalog_keyword(attrs) == "red"
+    payload = build_search_payload_from_attrs(attrs)
+    assert payload["clean_keyword"] == "red"
+    assert payload["attribute_filters"]["size_category"] == {"medium"}
 
 
 def test_serialise_for_json_converts_sets():
