@@ -614,6 +614,7 @@ def _debug_product_rows(products) -> list[dict]:
             "ColorMood": p.get("color_mood", ""),
             "Pattern": p.get("pattern", ""),
             "size": p.get("size", ""),
+            "size_cm": p.get("size_cm", ""),
             "material": p.get("material", ""),
             "display_price": p.get("display_price", ""),
             "color_match_method": reason.get("color_match_method"),
@@ -622,6 +623,62 @@ def _debug_product_rows(products) -> list[dict]:
             "why_recommended": reason.get("summary"),
         })
     return rows
+
+
+def _debug_search_params(keyword: str, llm_extraction: dict | None = None) -> dict:
+    """Size/price filters sent to Mongo — surfaced in browser DevTools console."""
+    price_filter, clean_keyword, _, attribute_filters = normalise_keyword(keyword or "")
+    params = {
+        "keyword_raw": keyword or "",
+        "mongo_keyword": clean_keyword,
+        "sizes_ft": sorted(attribute_filters.get("size") or []),
+        "sizes_cm": sorted(attribute_filters.get("size_cm") or []),
+        "size_categories": sorted(attribute_filters.get("size_category") or []),
+        "price_filter": price_filter,
+        "extraction_source": "regex",
+    }
+    if (
+        llm_extraction
+        and llm_extraction.get("use_llm_payload")
+        and llm_extraction.get("search_payload")
+    ):
+        payload = llm_extraction["search_payload"]
+        af = payload.get("attribute_filters") or {}
+        params["mongo_keyword"] = payload.get("clean_keyword") or clean_keyword
+        params["sizes_ft"] = sorted(af.get("size") or [])
+        params["sizes_cm"] = sorted(af.get("size_cm") or [])
+        params["size_categories"] = sorted(af.get("size_category") or [])
+        params["price_filter"] = payload.get("price_filter") or price_filter
+        params["extraction_source"] = "llm"
+    return serialise_for_json(params)
+
+
+def _product_search_tool_debug(
+    *,
+    keyword: str,
+    keyword_sent_to_api: str,
+    currency: str,
+    products,
+    llm_extract_debug: list | None = None,
+    extra: dict | None = None,
+) -> dict:
+    llm_extraction = llm_extract_debug[0] if llm_extract_debug else None
+    product_count = len(products) if isinstance(products, list) else 0
+    debug = {
+        "tool": "jaipur_rugs_product_search",
+        "keyword": keyword_sent_to_api,
+        "keyword_raw": keyword,
+        "keyword_sent_to_api": keyword_sent_to_api,
+        "currency": currency or "",
+        "products_found": product_count,
+        "products": _debug_product_rows(products),
+        "search_params": _debug_search_params(keyword, llm_extraction),
+    }
+    if llm_extraction:
+        debug["llm_extraction"] = serialise_for_json(llm_extraction)
+    if extra:
+        debug.update(extra)
+    return debug
 
 
 async def _run_product_show_more(
@@ -671,16 +728,18 @@ async def _run_product_show_more(
         collection_name=collection_name,
     )
     if debug_collector is not None:
-        debug_collector.append({
-            "tool": "jaipur_rugs_product_search",
-            "keyword": normalise_search_keyword(search_keyword),
-            "keyword_raw": search_keyword,
-            "keyword_sent_to_api": normalise_search_keyword(search_keyword),
-            "follow_up": "show_more",
-            "excluded_skus": sorted(exclude_skus),
-            "products_found": len(more_products),
-            "products": _debug_product_rows(more_products),
-        })
+        debug_collector.append(
+            _product_search_tool_debug(
+                keyword=search_keyword,
+                keyword_sent_to_api=normalise_search_keyword(search_keyword),
+                currency="",
+                products=more_products,
+                extra={
+                    "follow_up": "show_more",
+                    "excluded_skus": sorted(exclude_skus),
+                },
+            )
+        )
 
     show_more_response = format_product_search_message(
         more_products,
@@ -978,18 +1037,15 @@ async def chat_agent(
                         collection_name=collection_name,
                     )
                     if debug_collector is not None:
-                        tool_debug = {
-                            "tool": "jaipur_rugs_product_search",
-                            "keyword": keyword_sent_to_api,
-                            "keyword_raw": keyword,
-                            "keyword_sent_to_api": keyword_sent_to_api,
-                            "currency": args.get("currency", ""),
-                            "products_found": product_count,
-                            "products": _debug_product_rows(products),
-                        }
-                        if llm_extract_debug:
-                            tool_debug["llm_extraction"] = serialise_for_json(llm_extract_debug[0])
-                        debug_collector.append(tool_debug)
+                        debug_collector.append(
+                            _product_search_tool_debug(
+                                keyword=keyword,
+                                keyword_sent_to_api=keyword_sent_to_api,
+                                currency=args.get("currency", ""),
+                                products=products,
+                                llm_extract_debug=llm_extract_debug,
+                            )
+                        )
                     last_product_search_result = products
                     last_product_search_keyword = keyword_sent_to_api or keyword or user_message
                     output = json.dumps(products)
@@ -1087,19 +1143,16 @@ async def chat_agent(
                 collection_name=collection_name,
             )
             if debug_collector is not None:
-                force_debug = {
-                    "tool": "jaipur_rugs_product_search",
-                    "keyword": keyword_sent_to_api,
-                    "keyword_raw": keyword,
-                    "keyword_sent_to_api": keyword_sent_to_api,
-                    "currency": "",
-                    "products_found": product_count,
-                    "forced": True,
-                    "products": _debug_product_rows(products),
-                }
-                if llm_extract_debug:
-                    force_debug["llm_extraction"] = serialise_for_json(llm_extract_debug[0])
-                debug_collector.append(force_debug)
+                debug_collector.append(
+                    _product_search_tool_debug(
+                        keyword=keyword,
+                        keyword_sent_to_api=keyword_sent_to_api,
+                        currency=detected_currency,
+                        products=products,
+                        llm_extract_debug=llm_extract_debug,
+                        extra={"forced": True},
+                    )
+                )
             return format_product_search_message(
                 products if isinstance(products, list) else [],
                 no_results_keyword=keyword_sent_to_api or keyword or user_message,
