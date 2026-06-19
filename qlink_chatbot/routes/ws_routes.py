@@ -4,7 +4,6 @@ import os
 import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pymongo import MongoClient
 
 from qlink_chatbot.agent.chat_agent import chat_agent
 from qlink_chatbot.agent.summariser_agent import summariser_agent
@@ -19,11 +18,6 @@ from qlink_chatbot.utils.geo_utils import get_geo, currency_for_country
 from qlink_chatbot.database.pinecone_utils import store_vector_summary
 from qlink_chatbot.utils.cloudflare_client import normalize_public_image_url
 from qlink_chatbot.utils.logger_config import logger
-
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["JR"]
-sessions_collection = db["users"]
 
 ws_router = APIRouter()
 

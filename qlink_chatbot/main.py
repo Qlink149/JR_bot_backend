@@ -3,10 +3,11 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pymongo import MongoClient
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 load_dotenv()
+
+from qlink_chatbot.database.mongo_utils import mongo_health
 
 from qlink_chatbot.routes.dashboard_routes import dashboard_router
 from qlink_chatbot.routes.general_routes import general_router
@@ -138,11 +139,6 @@ if is_behind_proxy_cors():
     app.add_middleware(StripProxyCorsHeadersMiddleware)
     logger.info("[CORS] Stripping app CORS headers (nginx handles CORS)")
 
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["JR"]
-sessions_collection = db["users"]
-
 app.include_router(dashboard_router)
 app.include_router(general_router, prefix="/api/web")
 app.include_router(ws_router)
@@ -158,6 +154,7 @@ def ping():
             "behind_proxy_cors": is_behind_proxy_cors(),
         },
         "r2": r2_status(),
+        "mongo": mongo_health(),
     }
 
 @app.on_event("startup")

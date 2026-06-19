@@ -213,7 +213,14 @@ def get_stats():
 @dashboard_router.get("/dashboard/insights")
 def get_dashboard_insights():
     """Return overview cards and DB-backed insights for the admin dashboard."""
-    sessions = list(whatsapp_sessions_collection.find({}))
+    try:
+        sessions = list(whatsapp_sessions_collection.find({}))
+    except Exception as e:
+        logger.error("Dashboard insights MongoDB error", extra={"error": str(e)})
+        return JSONResponse(
+            {"error": "Database unavailable. Check MongoDB connection on the server."},
+            status_code=503,
+        )
     now = datetime.utcnow()
     active_cutoff = now - timedelta(minutes=30)
     total_messages = 0

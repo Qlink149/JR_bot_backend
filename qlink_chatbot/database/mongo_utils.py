@@ -34,6 +34,18 @@ whatsapp_processed_messages_collection = db["whatsapp_processed_messages"]
 handoff_requests_collection = db["handoff_requests"]
 
 
+def mongo_health() -> dict:
+    """Quick MongoDB connectivity check for /ping and ops debugging."""
+    try:
+        if not MONGO_URI:
+            return {"ok": False, "error": "MONGO_URI is not set"}
+        client.admin.command("ping")
+        return {"ok": True}
+    except Exception as e:
+        logger.error("MongoDB health check failed", extra={"error": str(e)})
+        return {"ok": False, "error": str(e)}
+
+
 def _get_sessions_collection(collection_name: str = "users"):
     if collection_name == "users_whatsapp":
         return whatsapp_sessions_collection

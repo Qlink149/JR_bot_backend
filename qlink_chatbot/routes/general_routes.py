@@ -7,7 +7,6 @@ import uuid
 from docx import Document
 from fastapi import APIRouter, Body, File, Request, UploadFile, Header
 from fastapi.responses import JSONResponse
-from pymongo import MongoClient
 from qlink_chatbot.utils.cloudflare_client import (
     R2NotConfiguredError,
     generate_presigned_put_url,
@@ -21,6 +20,7 @@ from qlink_chatbot.database.mongo_utils import (
     delete_alert_by_id,
     list_all_alerts,
     return_system_prompt,
+    sessions_collection,
     update_system_prompt,
     agent_login,
     update_visitor_insights,
@@ -34,11 +34,6 @@ from qlink_chatbot.database.pinecone_utils import (
     store_vector_summary,
 )
 from qlink_chatbot.utils.logger_config import logger
-
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["JR"]
-sessions_collection = db["users"]
 
 general_router = APIRouter()
 
@@ -437,7 +432,10 @@ async def get_all_alerts():
         return results if results else []
     except Exception as e:
         logger.error("Error Fetching alerts", extra={"error": e})
-        return JSONResponse({"error": "Failed to fetch all agent alerts"}, status_code=500)
+        return JSONResponse(
+            {"error": "Database unavailable. Check MongoDB connection on the server."},
+            status_code=503,
+        )
     
 @general_router.delete("/alerts/{id}")
 async def delete_alert(id: str):
