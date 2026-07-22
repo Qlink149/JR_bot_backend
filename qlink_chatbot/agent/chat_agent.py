@@ -27,7 +27,11 @@ from qlink_chatbot.utils.jr_search_llm_extract import serialise_for_json
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.product_format import format_product_search_message
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
-from qlink_chatbot.utils.support_contacts import general_support_phone, support_contacts_blurb
+from qlink_chatbot.utils.support_contacts import (
+    SHOP_EMAIL,
+    general_support_phone,
+    support_contacts_blurb,
+)
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
@@ -850,10 +854,6 @@ async def chat_agent(
             )
 
         if _is_rug_pad_query(user_message):
-            from qlink_chatbot.utils.support_contacts import (
-                SHOP_EMAIL,
-                general_support_phone,
-            )
             support_phone = general_support_phone(country_code, session_id)
             return (
                 "Yes, we sell custom anti-slip mats (rug pads) tailored to your rug size. They help "
