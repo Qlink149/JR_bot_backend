@@ -80,11 +80,19 @@ Supported attributes:
 - Shape (round, oval, square, runner, rectangle)
 - Style / Pattern
 - Material
-- Construction (hand knotted, hand tufted, hand loom)
+- Construction (hand knotted, hand tufted, hand loom, flat weaves, shag)
 - Size / Dimensions (8x10, 9x12 in ft; 347x289 or 347x289 cm for centimetres)
-- Room (living room, dining room, bedroom)
+- Room (living room, dining room, bedroom, kids room)
+- Mega-menu tags: new arrival, bestsellers, outdoor, antique, rug swatch
 - Weight (8kg — ceiling filter)
 - Price (currency + value)
+
+Always call `jaipur_rugs_product_search` for these — never invent "no rugs found":
+{"keyword": "new arrival"}
+{"keyword": "bestsellers"}
+{"keyword": "outdoor"}
+{"keyword": "antique"}
+{"keyword": "rug swatch"}
 
 Multi-attribute rule (JR API PDF): use simple terms with & for AND, || for OR within one attribute.
 Example from API docs: "red&blue||vintage" means red AND (blue OR vintage).

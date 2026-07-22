@@ -69,7 +69,7 @@ tools = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Search keyword sent to Jaipur Rugs product API. Use '&' to AND multiple attributes (all must match) and '||' to OR alternatives within one attribute. IMPORTANT: for multi-attribute queries use simple terms joined by & — e.g. 'blue&round', 'red&8x10', 'wool&hand knotted'. Do NOT expand colors with || when combining with other attributes — pass the user's exact color word; the backend searches GrColor first, then similar shades automatically. Supported attributes: color, shape (round/oval/square/runner/rectangle), size (8x10), material (wool/silk/jute), construction (hand knotted/hand tufted), style/pattern (modern/geometric/floral), price. Examples: 'beige', 'blue&round', 'red&8x10', 'wool&8x10', 'blue&oval&under INR 50000', 'red||orange' (color OR only). Include price expressions like 'above INR 50000' in the keyword."
+                    "description": "Search keyword for Jaipur Rugs catalog. Use '&' to AND attributes. Supported: color, shape, size (8x10), material, construction, style/pattern, room, price, AND mega-menu tags: 'new arrival' / 'bestsellers' / 'outdoor' / 'antique' / 'rug swatch'. Examples: 'new arrival', 'bestsellers', 'outdoor', 'beige', 'blue&round', 'red&8x10', 'wool&hand knotted'. For a fresh category ask (new arrivals/bestsellers), pass ONLY that tag — do not reuse previous search colors/sizes."
                 },
                 "currency": {
                     "type": "string",
@@ -280,6 +280,8 @@ _PRODUCT_SHOW_MORE_PHRASES = {
 
 _SEARCH_INTENT_RE = re.compile(
     r"\b(show me|show|find|search|looking for|look for|i want|i need|"
+    r"new arrival|new arrivals|bestsellers?|best sellers?|"
+    r"outdoor rugs?|antique rugs?|rug swatch|swatches|"
     r"under \d|above \d|below \d|over \d|\d+\s*kg|lightweight|light weight)\b",
     re.IGNORECASE,
 )
@@ -433,11 +435,25 @@ def _is_new_product_search_request(user_message: str, chat_history, previous_sea
     msg = (user_message or "").lower().strip()
     if _SEARCH_INTENT_RE.search(msg):
         return True
+    # Bare category / attribute browses: "new arrival rugs", "wool rugs", "8x10 rugs"
+    _pf, _clean, _colors, attrs = normalise_keyword(msg)
+    has_search_attrs = any(
+        attrs.get(key)
+        for key in (
+            "color", "color_exact", "shape", "size", "size_cm", "size_category",
+            "material", "construction", "pattern", "room", "catalog_tag",
+            "multicolor", "weight_max",
+        )
+    )
+    rug_terms = ("rug", "rugs", "carpet", "carpets")
+    if has_search_attrs and any(t in msg for t in rug_terms):
+        return True
+    if has_search_attrs and attrs.get("catalog_tag"):
+        return True
     search_verbs = (
         "show me", "show", "find", "search", "do you have", "looking for",
         "look for", "i want", "i need", "any ",
     )
-    rug_terms = ("rug", "rugs", "carpet", "carpets")
     return any(v in msg for v in search_verbs) and any(t in msg for t in rug_terms)
 
 
@@ -1189,16 +1205,21 @@ async def chat_agent(
             or _is_price_refinement_followup(user_message, previous_searches)
         )
         ):
+            from qlink_chatbot.utils.jr_search_llm_extract import _should_ignore_previous_search
+
             keyword = resolve_search_keyword({}, user_message)
-            keyword = _merge_search_with_previous(
-                keyword,
-                user_message,
-                previous_searches,
-            )
+            ignore_previous = _should_ignore_previous_search(keyword, user_message)
+            if not ignore_previous:
+                keyword = _merge_search_with_previous(
+                    keyword,
+                    user_message,
+                    previous_searches,
+                )
             keyword_sent_to_api = normalise_search_keyword(keyword)
             logger.info(
                 f"[AGENT-FORCE-SEARCH] session={session_id} "
-                f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r}"
+                f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r} "
+                f"ignore_previous={ignore_previous}"
             )
             llm_extract_debug: list = []
             products = await jaipur_rugs_product_search(
@@ -1207,8 +1228,12 @@ async def chat_agent(
                 country_code=country_code,
                 requested_currency=detected_currency,
                 user_message=user_message,
-                previous_search_keyword=_latest_search_keyword(previous_searches),
-                chat_context=format_recent_chat_for_ai(chat_history, limit=4),
+                previous_search_keyword=(
+                    "" if ignore_previous else _latest_search_keyword(previous_searches)
+                ),
+                chat_context=(
+                    "" if ignore_previous else format_recent_chat_for_ai(chat_history, limit=4)
+                ),
                 extraction_debug_out=llm_extract_debug,
             )
             product_count = len(products) if isinstance(products, list) else 0

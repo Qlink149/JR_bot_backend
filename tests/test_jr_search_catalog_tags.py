@@ -157,6 +157,14 @@ def test_fresh_new_arrival_ignores_previous_search():
     ) is False
 
 
+def test_agent_detects_new_arrival_as_product_search():
+    from qlink_chatbot.agent.chat_agent import _is_new_product_search_request
+
+    assert _is_new_product_search_request("new arrival rugs", [], []) is True
+    assert _is_new_product_search_request("bestsellers", [], []) is True
+    assert _is_new_product_search_request("outdoor rugs", [], []) is True
+
+
 def test_sanitize_strips_previous_bleed_from_new_arrival():
     polluted = {
         "colors": ["purple"],
