@@ -736,12 +736,15 @@ def merge_extraction_keywords(
 
 
 def _catalog_hints() -> str:
-    colors = ", ".join(sorted(COLOR_ALIASES.keys())[:30])
+    # Full lists — truncating colors previously dropped purple/violet/etc.
+    colors = ", ".join(sorted(COLOR_ALIASES.keys()))
     shapes = ", ".join(sorted(SHAPE_ALIASES.keys()))
+    patterns = ", ".join(sorted(PATTERN_ALIASES.keys()))
     materials = ", ".join(MATERIAL_KEYWORDS)
     return (
-        f"Allowed colors (use exact key): {colors}, ...\n"
-        f"Allowed shapes: {shapes}\n"
+        f"Allowed color keys (use EXACTLY these strings in colors[]): {colors}\n"
+        f"Allowed shape keys: {shapes}\n"
+        f"Allowed pattern/style keys: {patterns}\n"
         f"Allowed materials: {materials}\n"
         f"Allowed constructions: {', '.join(CONSTRUCTION_KEYWORDS)}\n"
         f"Allowed rooms: {', '.join(ROOM_KEYWORDS)}"
@@ -749,45 +752,175 @@ def _catalog_hints() -> str:
 
 
 def build_extraction_prompt() -> str:
-    return f"""You are a precise attribute extractor for Jaipur Rugs product search.
+    return f"""You extract product-search attributes for Jaipur Rugs. Output MUST follow the JSON schema.
 
-CRITICAL PRICE RULES (read carefully):
-- If the user mentions ANY budget, price, cost, above, under, over, below, between, k, lakh, lac, cr — set has_price_filter=true.
-- ALWAYS expand shorthand to full integers in price_amount / price_min / price_max:
-  * 50k or 50K = 50000
-  * 1.5k = 1500
-  * 2 lakh / 2 lac / 2l = 200000
-  * 4lc = 400000
-  * 1 cr / 1 crore = 10000000
-- price_type: gte (above/over/min), lte (under/below/budget), range (between X and Y), none (no price).
-- price_currency: INR, USD, EUR, GBP, AUD, CHF, SGD, or AED. Infer from user text (usd/dollar→USD, rs/rupee→INR).
-- price_raw_phrase: copy the exact price words from the user message.
-- NEVER output 50 when user said 50k. NEVER invent prices not in the message.
+MISSION
+Extract EVERY concrete shopping attribute the user (or tool keyword) asked for.
+Missing a stated color/size/material is a critical failure. Inventing attributes is also a failure.
 
-CATALOG RULES:
-- Only use colors/shapes/materials from the allowed lists below.
-- size_categories: small, medium, large, oversize (NOT foot dimensions like 8x10). Map oversized → oversize.
-- Put foot dimensions in sizes_ft (8x10) and size buckets in size_categories (medium).
-- Empty arrays when not mentioned. Do not guess attributes.
-- refinement: refine_previous (modifies prior search), show_more (pagination), else new.
+SOURCE PRIORITY (read ALL of them; merge attributes from every source):
+1) User message (any language / typos / slang)
+2) Agent tool keyword if present (often already structured like purple&12x15 — TRUST it)
+3) Previous search keyword + recent chat only for refinement/show_more context
 
-EXAMPLES (output shape only):
-User: "show me above 50k usd"
-→ has_price_filter=true, price_type=gte, price_currency=USD, price_amount=50000, price_raw_phrase="50k usd"
+NEVER-DROP RULES
+- If a color word appears in the user message OR tool keyword, it MUST appear in colors[].
+  Examples that MUST yield colors=["purple"]: "purple rugs", "show purple", "बैंगनी", "baingani", "purple&12x15".
+- If a foot size appears (8x10, 8×10, 8*10, 8 by 10, 12x15), put it in sizes_ft as NxM (ascii x).
+  "in range of size 12*15" / "size 12x15" / "12 by 15" → sizes_ft=["12x15"].
+- If both color AND size are present, extract BOTH. Never keep only size.
+- Typos: rungs→rugs (ignore), purpel→purple, gry→grey, woollen→wool when clear.
+- Multilingual: map common color words to English catalog keys
+  (e.g. baingani/बैंगनी→purple, neela/नीला→blue, laal/लाल→red, safed→white, kala→black).
+- Do NOT treat "range of size" as a price range. Size language ≠ price.
 
-User: "blue round rugs under INR 50000"
+SIZE RULES
+- Foot dimensions → sizes_ft (normalize separators * × by / - to x). Never put 8x10 in size_categories.
+- size_categories only for bucket words: small, medium, large, oversize (map oversized→oversize).
+- CM dimensions (e.g. 240x300 cm, 240×300cm) → sizes_cm.
+
+PRICE RULES
+- Any budget/price/cost/above/under/over/below/between/k/lakh/lac/cr → has_price_filter=true.
+- Expand shorthand to full integers: 50k→50000, 1.5k→1500, 2 lakh/2lac/2l→200000, 4lc→400000, 1cr→10000000.
+- price_type: gte | lte | range | none. price_currency: INR|USD|EUR|GBP|AUD|CHF|SGD|AED.
+- price_raw_phrase = exact price words from the user. Never invent amounts.
+
+CATALOG RULES
+- colors/shapes/patterns/materials/constructions/rooms MUST use keys from the allowed lists below.
+- Empty array only when that attribute was NOT mentioned. Do not guess.
+- refinement: refine_previous | show_more | new.
+
+EXAMPLES (attribute intent only):
+"show me above 50k usd"
+→ has_price_filter=true, price_type=gte, price_currency=USD, price_amount=50000
+
+"blue round rugs under INR 50000"
 → colors=["blue"], shapes=["round"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=50000
 
-User: "between USD 1000 to 5000"
-→ has_price_filter=true, price_type=range, price_currency=USD, price_min=1000, price_max=5000
+"show me purple rugs in range of size 12*15"
+→ colors=["purple"], sizes_ft=["12x15"]   ← BOTH required; "range of size" is NOT price
 
-User: "show me red wool 8x10"
-→ colors=["red"], materials=["wool"], sizes_ft=["8x10"], has_price_filter=false, price_type=none
+"purple&12x15" (tool keyword)
+→ colors=["purple"], sizes_ft=["12x15"]
 
-User: "red medium size rug above 10 lac for bedroom"
+"show me red wool 8x10"
+→ colors=["red"], materials=["wool"], sizes_ft=["8x10"]
+
+"red medium size rug above 10 lac for bedroom"
 → colors=["red"], size_categories=["medium"], rooms=["bedroom"], has_price_filter=true, price_type=gte, price_currency=INR, price_amount=1000000
 
+"baingani gol dari 8x10"
+→ colors=["purple"], shapes=["round"], sizes_ft=["8x10"]
+
+"hand tufted blue round under 2 lakh"
+→ colors=["blue"], shapes=["round"], constructions=["hand tufted"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=200000
+
 {_catalog_hints()}"""
+
+
+def backfill_attrs_from_regex(
+    attrs: dict,
+    *,
+    keyword: str = "",
+    user_message: str = "",
+) -> tuple[dict, list[str]]:
+    """Fill gaps the LLM missed using deterministic regex/alias parsing.
+
+    Never removes LLM values — only adds missing colors/sizes/shapes/etc.
+    Parses keyword and user_message separately (joining them confuses the parser).
+    """
+    notes: list[str] = []
+    sources = [s for s in ((keyword or "").strip(), (user_message or "").strip()) if s]
+    if not sources:
+        return attrs, notes
+
+    color_terms: set[str] = set()
+    filters: dict[str, set] = {
+        "color": set(),
+        "color_exact": set(),
+        "shape": set(),
+        "size": set(),
+        "size_cm": set(),
+        "size_category": set(),
+        "material": set(),
+        "construction": set(),
+        "pattern": set(),
+        "room": set(),
+        "weight_max": set(),
+        "multicolor": set(),
+    }
+    for source in sources:
+        _pf, _clean, terms, parsed = normalise_keyword(source)
+        color_terms.update(terms or set())
+        for key, values in (parsed or {}).items():
+            filters.setdefault(key, set()).update(values or set())
+
+    out = dict(attrs)
+    for key in (
+        "colors", "shapes", "sizes_ft", "sizes_cm", "size_categories",
+        "materials", "constructions", "patterns", "rooms",
+    ):
+        out[key] = list(out.get(key) or [])
+
+    for color in sorted(filters.get("color_exact") or set()):
+        if color not in out["colors"]:
+            out["colors"].append(color)
+            notes.append(f"backfill:color:{color}")
+
+    if not out["colors"] and color_terms:
+        for term in sorted(color_terms):
+            key = _COLOR_KEYS_LOWER.get(term.lower())
+            if key and key not in out["colors"]:
+                out["colors"].append(key)
+                notes.append(f"backfill:color_term:{key}")
+
+    for shape in sorted(filters.get("shape") or set()):
+        if shape not in out["shapes"]:
+            out["shapes"].append(shape)
+            notes.append(f"backfill:shape:{shape}")
+
+    for size in sorted(filters.get("size") or set()):
+        if size not in out["sizes_ft"]:
+            out["sizes_ft"].append(size)
+            notes.append(f"backfill:size:{size}")
+
+    for size in sorted(filters.get("size_cm") or set()):
+        if size not in out["sizes_cm"]:
+            out["sizes_cm"].append(size)
+            notes.append(f"backfill:size_cm:{size}")
+
+    for category in sorted(filters.get("size_category") or set()):
+        if category not in out["size_categories"]:
+            out["size_categories"].append(category)
+            notes.append(f"backfill:size_category:{category}")
+
+    for material in sorted(filters.get("material") or set()):
+        if material not in out["materials"]:
+            out["materials"].append(material)
+            notes.append(f"backfill:material:{material}")
+
+    for construction in sorted(filters.get("construction") or set()):
+        if construction not in out["constructions"]:
+            out["constructions"].append(construction)
+            notes.append(f"backfill:construction:{construction}")
+
+    for pattern in sorted(filters.get("pattern") or set()):
+        if pattern not in out["patterns"]:
+            out["patterns"].append(pattern)
+            notes.append(f"backfill:pattern:{pattern}")
+
+    for room in sorted(filters.get("room") or set()):
+        if room not in out["rooms"]:
+            out["rooms"].append(room)
+            notes.append(f"backfill:room:{room}")
+
+    if (filters.get("multicolor") or set()) and not out.get("multicolor"):
+        out["multicolor"] = True
+        notes.append("backfill:multicolor")
+
+    if notes:
+        logger.info(f"[LLM-EXTRACT] regex backfill applied: {notes}")
+    return out, notes
 
 
 async def extract_search_attributes(
@@ -810,20 +943,25 @@ async def extract_search_attributes(
         return {}, ["empty_query"]
 
     default_currency = normalize_currency_code(detected_currency or "INR")
+    tool_kw = (keyword or "").strip()
 
     user_content = (
-        f"PRIMARY user message (extract from this): {query_text}\n"
+        "Extract ALL search attributes from the sources below. "
+        "If a color or size appears in ANY source, you MUST include it.\n\n"
+        f"USER MESSAGE:\n{query_text}\n\n"
         f"Default currency if not specified: {default_currency}\n"
         f"User country code: {country_code or 'unknown'}"
     )
-    if keyword and keyword.strip().lower() != query_text.lower():
-        user_content += f"\nAgent tool keyword (secondary hint only): {keyword.strip()}"
+    if tool_kw and tool_kw.lower() != query_text.lower():
+        user_content += (
+            f"\n\nAGENT TOOL KEYWORD (first-class source — parse every & segment):\n{tool_kw}"
+        )
     if previous_search_keyword:
         user_content += (
-            f"\nPrevious search keyword (for refinement context): {previous_search_keyword}"
+            f"\n\nPREVIOUS SEARCH KEYWORD (refinement context only):\n{previous_search_keyword}"
         )
     if chat_context:
-        user_content += f"\nRecent conversation:\n{chat_context}"
+        user_content += f"\n\nRECENT CONVERSATION:\n{chat_context}"
 
     try:
         response = await _client.responses.create(
@@ -839,12 +977,19 @@ async def extract_search_attributes(
         if not isinstance(raw, dict):
             return {}, ["invalid_json_type"]
         logger.info(f"[LLM-EXTRACT] raw LLM JSON: {raw}")
-        return validate_extracted_attributes(
+        attrs, dropped = validate_extracted_attributes(
             raw,
             source_text=query_text,
             default_currency=default_currency,
             llm_primary=llm_primary,
         )
+        attrs, backfill_notes = backfill_attrs_from_regex(
+            attrs,
+            keyword=tool_kw,
+            user_message=query_text,
+        )
+        dropped.extend(backfill_notes)
+        return attrs, dropped
     except Exception as err:
         logger.warning(f"[LLM-EXTRACT] extraction failed: {err}")
         return {}, [f"error:{err}"]

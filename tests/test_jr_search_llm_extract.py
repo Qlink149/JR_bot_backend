@@ -266,6 +266,21 @@ def test_serialise_for_json_converts_sets():
     assert out == {"color": ["red"], "shape": []}
 
 
+def test_backfill_restores_purple_when_llm_dropped_color():
+    from qlink_chatbot.utils.jr_search_llm_extract import backfill_attrs_from_regex
+
+    attrs, _ = validate_extracted_attributes(_v2_raw(sizes_ft=["12x15"]))
+    assert attrs["colors"] == []
+    filled, notes = backfill_attrs_from_regex(
+        attrs,
+        keyword="purple&12x15",
+        user_message="show me purple rugs in range of size 12*15",
+    )
+    assert "purple" in filled["colors"]
+    assert "12x15" in filled["sizes_ft"]
+    assert any(n.startswith("backfill:color") for n in notes)
+
+
 def test_normalise_after_synthesized_keyword():
     attrs, _ = validate_extracted_attributes(_v2_raw(
         colors=["blue"],

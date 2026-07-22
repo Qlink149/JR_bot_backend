@@ -117,6 +117,7 @@ jobs:
                 -e JR_API_CLIENT_SECRET="${{ secrets.JR_API_CLIENT_SECRET }}" \
                 -e CORS_ORIGINS="${{ secrets.CORS_ORIGINS }}" \
                 -e CRON_SECRET="${{ secrets.CRON_SECRET }}" \
+                -e SEARCH_EXTRACTION_MODE="${{ vars.SEARCH_EXTRACTION_MODE || secrets.SEARCH_EXTRACTION_MODE || 'llm_primary' }}" \
                 "$IMAGE_NAME"
             }
 
