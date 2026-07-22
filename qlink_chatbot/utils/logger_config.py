@@ -25,7 +25,16 @@ class SingletonLogger:
 
     def _initialize_logger(self):
         self.logger = logging.getLogger("SingletonLogger")
-        self.logger.setLevel(logging.DEBUG)
+        # Production default INFO; set LOG_LEVEL=DEBUG for verbose local/dev.
+        level_name = (os.getenv("LOG_LEVEL") or "").strip().upper()
+        env_mode = (os.getenv("ENV_MODE") or os.getenv("ENV") or "").strip().lower()
+        if level_name in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+            level = getattr(logging, level_name)
+        elif env_mode in {"prod", "production"}:
+            level = logging.INFO
+        else:
+            level = logging.INFO
+        self.logger.setLevel(level)
         self.logger.propagate = False
 
         # Reuse the existing logger instance during hot reloads/import retries.
@@ -35,7 +44,7 @@ class SingletonLogger:
         formatter = JsonFormatter()
 
         stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setLevel(level)
         stream_handler.setFormatter(formatter)
         self.logger.addHandler(stream_handler)
 
@@ -46,7 +55,7 @@ class SingletonLogger:
         try:
             os.makedirs(log_dir, exist_ok=True)
             file_handler = logging.FileHandler(filename=log_file_path, mode="a")
-            file_handler.setLevel(logging.DEBUG)
+            file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
         except OSError:

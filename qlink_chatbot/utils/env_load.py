@@ -9,6 +9,8 @@ gupshup_app_name = os.getenv("GUPSHUP_APP_NAME", "")
 qlink_app_name = os.getenv("QLINK_APP_NAME", gupshup_app_name)
 gupshup_source = os.getenv("GUPSHUP_SOURCE", "")
 default_country_code = os.getenv("DEFAULT_COUNTRY_CODE", "91")
+# WhatsApp image delivery (Cloudinary Fetch → JPEG). Same as Kisna.
+cloudinary_cloud_name = (os.getenv("CLOUDINARY_CLOUD_NAME") or "").strip()
 
 # Qliink / Kisna WhatsApp App
 qlink_gupshup_app_id = os.getenv("QLINK_GUPSHUP_APP_ID", "")

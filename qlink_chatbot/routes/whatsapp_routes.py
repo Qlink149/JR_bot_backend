@@ -21,6 +21,16 @@ from qlink_chatbot.utils.support_contacts import (
     country_from_phone,
     general_support_phone,
 )
+from qlink_chatbot.utils.search_session import (
+    build_search_intro,
+    products_have_size_relaxed,
+)
+from qlink_chatbot.utils.search_trace import log_search_turn
+from qlink_chatbot.utils.whatsapp_guards import (
+    is_inbound_rate_limited,
+    release_phone_lock,
+    try_acquire_phone_lock,
+)
 from qlink_chatbot.utils.whatsapp_images import get_whatsapp_safe_image_url
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 from qlink_chatbot.whatsapp_functions.send_typing_indicator import typing_indicator_loop
@@ -112,10 +122,12 @@ def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
     """Convert product dicts to WhatsApp interactive_cta message dicts."""
     messages: list[dict] = []
     sym = _CURRENCY_SYMBOLS.get(currency, currency + " ")
+    ordinal = 0
 
     for product in products:
         if not isinstance(product, dict):
             continue
+        ordinal += 1
 
         name = (product.get("name") or product.get("collection") or "Jaipur Rug").strip()
         raw_image = product.get("image") or product.get("image_url") or ""
@@ -125,17 +137,20 @@ def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
         material = (product.get("material") or product.get("fabric", "")).strip()
         construction = product.get("construction", "")
 
-        mrp = product.get("mrp", {})
-        price_val = mrp.get(currency)
-        if price_val:
-            try:
-                price_str = f"{sym}{float(price_val):,.0f} {currency}"
-            except (TypeError, ValueError):
-                price_str = f"{sym}{price_val} {currency}"
-        else:
-            price_str = "Price on request"
+        # Prefer search display_price (matches web/agent); fallback to mrp[currency].
+        price_str = (product.get("display_price") or "").strip()
+        if not price_str:
+            mrp = product.get("mrp", {}) or {}
+            price_val = mrp.get(currency)
+            if price_val:
+                try:
+                    price_str = f"{sym}{float(price_val):,.0f} {currency}"
+                except (TypeError, ValueError):
+                    price_str = f"{sym}{price_val} {currency}"
+            else:
+                price_str = "Price on request"
 
-        lines = [f"*{name}*"]
+        lines = [f"*{ordinal}. {name}*"]
         if size:
             lines.append(f"• Size: {size}")
         if material:
@@ -143,6 +158,8 @@ def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
         lines.append(f"• Price: {price_str}")
         if construction:
             lines.append(f"• Construction: {construction}")
+        if product.get("size_relaxed"):
+            lines.append("• Closest available size (exact size not in stock)")
 
         caption = "\n".join(lines)
 
@@ -260,6 +277,7 @@ def _extract_user_message_text(message_payload: dict) -> str:
 async def _process_message(request_data: dict) -> None:
     """Process the inbound WhatsApp message in the background after returning 200."""
     phone_number = ""
+    lock_held = False
     try:
         gupshup_message = _extract_gupshup_message(request_data)
 
@@ -323,6 +341,27 @@ async def _process_message(request_data: dict) -> None:
             logger.info(f"[WA] Duplicate message skipped id={message_id}")
             return
 
+        if is_inbound_rate_limited(phone_number):
+            dispatch_whatsapp_responses(
+                phone_number=phone_number,
+                bot_responses=[{
+                    "type": "text",
+                    "text": "Please wait a moment before sending another message.",
+                }],
+            )
+            return
+
+        if not try_acquire_phone_lock(phone_number):
+            dispatch_whatsapp_responses(
+                phone_number=phone_number,
+                bot_responses=[{
+                    "type": "text",
+                    "text": "Still working on your previous message — one moment please.",
+                }],
+            )
+            return
+        lock_held = True
+
         logger.info(f"[WA-IN] phone={phone_number} name={whatsapp_username!r} msg={user_text!r} image={'yes' if image_url else 'no'}")
 
         # Non-image media still unsupported
@@ -380,6 +419,8 @@ async def _process_message(request_data: dict) -> None:
 
         ai_text = ""
         responses: list[dict] = []
+        latest_products: list = []
+        new_products_found = False
         try:
             searches_before = get_previous_search(session_id,
                                                   collection_name=WHATSAPP_COLLECTION_NAME)
@@ -404,8 +445,10 @@ async def _process_message(request_data: dict) -> None:
             logger.info(f"[WA] Product search triggered={new_products_found} (before={count_before} after={len(searches_after) if searches_after else 0})")
 
             product_cards_sent = False
+            latest_products = []
             if new_products_found:
-                latest_products = (searches_after[-1] or {}).get("results", [])
+                latest_entry = searches_after[-1] or {}
+                latest_products = latest_entry.get("results", []) or []
                 if latest_products:
                     product_cards = _format_products_for_whatsapp(latest_products, currency)
                     logger.info(
@@ -425,6 +468,11 @@ async def _process_message(request_data: dict) -> None:
             # blocks (including broken ![Rug Image] lines) into the text reply.
             if product_cards_sent:
                 wa_text = _whatsapp_text_after_product_cards(ai_text or "")
+                if products_have_size_relaxed(latest_products):
+                    disclose = build_search_intro(products=latest_products)
+                    # Prefer honest size/filter note over generic AI first paragraph.
+                    if "exact size" in disclose.lower() or "broadened" in disclose.lower():
+                        wa_text = disclose
             else:
                 wa_text = _markdown_to_whatsapp(ai_text or "")
             if wa_text:
@@ -447,7 +495,17 @@ async def _process_message(request_data: dict) -> None:
         save_message(session_id=session_id, role="assistant", content=ai_text,
                      collection_name=WHATSAPP_COLLECTION_NAME)
 
-        dispatch_whatsapp_responses(phone_number=phone_number, bot_responses=responses)
+        dispatch_errors = dispatch_whatsapp_responses(
+            phone_number=phone_number, bot_responses=responses
+        )
+        log_search_turn(
+            session_id=session_id,
+            channel="whatsapp",
+            products_found=len(latest_products) if new_products_found else 0,
+            wa_cards_sent=sum(1 for r in responses if r.get("type") == "interactive_cta"),
+            dispatch_errors=dispatch_errors if isinstance(dispatch_errors, int) else 0,
+            size_relaxed=products_have_size_relaxed(latest_products) if latest_products else False,
+        )
 
     except Exception as e:
         logger.exception("Exception in background message processing",
@@ -461,6 +519,9 @@ async def _process_message(request_data: dict) -> None:
             except Exception as send_error:
                 logger.error("Failed to send fallback message",
                              extra={"error": str(send_error), "phone_number": phone_number})
+    finally:
+        if lock_held and phone_number:
+            release_phone_lock(phone_number)
 
 
 @whatsapp_router.post("/gupshup/message/hc")

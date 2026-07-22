@@ -36,10 +36,14 @@ def _gap_seconds() -> float:
     return IMAGE_TO_CTA_DELAY_SECONDS
 
 
-def dispatch_whatsapp_responses(phone_number: str, bot_responses):
-    """Send one or multiple bot responses to WhatsApp using Gupshup helpers."""
+def dispatch_whatsapp_responses(phone_number: str, bot_responses) -> int:
+    """Send one or multiple bot responses to WhatsApp using Gupshup helpers.
+
+    Returns the number of items that failed to send.
+    """
     responses = _normalize_responses(bot_responses)
     gap = max(0.0, _gap_seconds())
+    dispatch_errors = 0
 
     for index, response in enumerate(responses):
         if index > 0 and gap:
@@ -96,6 +100,7 @@ def dispatch_whatsapp_responses(phone_number: str, bot_responses):
             )
         except Exception as exc:
             # Don't abort the carousel if one card fails (Kisna isolation).
+            dispatch_errors += 1
             logger.error(
                 "WhatsApp dispatch item failed — continuing",
                 extra={
@@ -105,3 +110,5 @@ def dispatch_whatsapp_responses(phone_number: str, bot_responses):
                     "error": str(exc),
                 },
             )
+
+    return dispatch_errors

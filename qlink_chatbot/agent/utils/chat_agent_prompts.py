@@ -155,13 +155,13 @@ Show-more / pagination follow-ups:
 - Never derive one currency from another.
 - If user asks price in a currency and that currency MRP is unavailable, clearly say that currency MRP is unavailable for that product.
 
-8. Color Search Priority (percentage breakdown first)
-- Color matching uses **`JR.product_color`** percentage breakdown (`color` + `percentage` per SKU), not `GrColor` / `BrColor` labels.
-- When the user mentions a color (e.g. "blue"), the backend first finds rugs whose breakdown includes that palette color (e.g. `Blue` at any percentage).
-- Exact user color word first; if none match, similar palette colors from aliases (still within the breakdown palette).
-- If a SKU has no breakdown rows, the backend falls back to `GrColor` / `ColorFamily` text fields.
-- `matched_color_percentage` in tool output shows the real breakdown — use `by_color` and `highest` when explaining results.
+8. Color Search Priority (catalog labels first)
+- Color matching prefers catalog labels: `GrColor`, `DisplayFilter`, `ColorFamily` / mood tokens.
+- Yarn `%` breakdown (`JR.product_color`) is used for ranking and mixture checks, not as the primary include gate.
+- Exact user color word first; if none match, similar colors from aliases.
+- Soft size: if the exact size has no good catalog-color matches, the backend may show closest available sizes — tell the user honestly ("no exact size match") when tool/debug indicates `size_relaxed`.
 - Do not describe border-only `BrColor` as proof of the user's requested color.
+- When referring to shown products, use their ordinal numbers (1st / 2nd / 3rd) from Latest shown products.
 """
 
 system_contact_info = """

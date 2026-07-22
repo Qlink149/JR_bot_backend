@@ -83,16 +83,23 @@ def save_message(
     content: str,
     collection_name: str = "users",
 ):
-    """Append message to chat_history inside session document."""
+    """Append message to chat_history inside session document (capped)."""
     try:
+        from qlink_chatbot.utils.search_session import CHAT_HISTORY_MAX_LENGTH
+
         now = datetime.utcnow()
         message = {"role": role, "content": content, "timestamp": now}
         session_collection = _get_sessions_collection(collection_name=collection_name)
         session_collection.update_one(
             {"session_id": session_id},
             {
-                "$push": {"chat_history": message},
-                "$set": {"updated_at": now},
+                "$push": {
+                    "chat_history": {
+                        "$each": [message],
+                        "$slice": -CHAT_HISTORY_MAX_LENGTH,
+                    }
+                },
+                "$set": {"updated_at": now, "last_message_at": now},
             },
             upsert=True,
         )
@@ -284,13 +291,18 @@ def save_previous_search(
     search_keyword: str,
     search_results: list,
     collection_name: str = "users",
+    *,
+    allow_empty: bool = False,
 ):
     """Store the user's previous search results in the session.
     Only keeps the last 3 searches.
-    
-    search_results: List of product dicts returned from Jaipur Rugs API.
+
+    Empty results are persisted when allow_empty=True so a failed refine does
+    not leave the prior successful products as "latest shown".
     """
-    if not isinstance(search_results, list) or not search_results:
+    if not isinstance(search_results, list):
+        return 0
+    if not search_results and not allow_empty:
         return 0
     try:
         now = datetime.utcnow()
@@ -304,40 +316,149 @@ def save_previous_search(
                             {
                                 "keyword": search_keyword,
                                 "results": search_results,
-                                "timestamp": now
+                                "timestamp": now,
+                                "empty": not bool(search_results),
                             }
                         ],
                         "$slice": -3  # Keep only the last 3 searches
                     }
                 },
-                "$set": {"updated_at": now}
+                "$set": {"updated_at": now, "last_search_at": now},
             },
             upsert=True
         )
-        logger.info(f"Saved previous search for session {session_id}: {search_keyword}")
+        logger.info(
+            f"Saved previous search for session {session_id}: {search_keyword!r} "
+            f"n={len(search_results)} empty={not bool(search_results)}"
+        )
         return result.modified_count
     except Exception as e:
         logger.error("Error saving previous search", extra={"error": e})
         raise e
-    
+
+
+def save_search_buffer(
+    session_id: str,
+    keyword: str,
+    products: list,
+    *,
+    offset: int = 0,
+    collection_name: str = "users",
+):
+    """Persist remaining product pool for show-more pagination."""
+    try:
+        now = datetime.utcnow()
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session_collection.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {
+                    "search_buffer": {
+                        "keyword": keyword,
+                        "products": products if isinstance(products, list) else [],
+                        "offset": max(0, int(offset)),
+                        "updated_at": now,
+                    },
+                    "updated_at": now,
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        logger.error("Error saving search buffer", extra={"error": e})
+        raise e
+
+
+def get_search_buffer(session_id: str, collection_name: str = "users") -> dict:
+    try:
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session = session_collection.find_one(
+            {"session_id": session_id},
+            {"_id": 0, "search_buffer": 1},
+        )
+        buf = (session or {}).get("search_buffer") or {}
+        return buf if isinstance(buf, dict) else {}
+    except Exception as e:
+        logger.error("Error fetching search buffer", extra={"error": e})
+        return {}
+
+
+def clear_search_buffer(session_id: str, collection_name: str = "users") -> None:
+    try:
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session_collection.update_one(
+            {"session_id": session_id},
+            {"$unset": {"search_buffer": ""}, "$set": {"updated_at": datetime.utcnow()}},
+        )
+    except Exception as e:
+        logger.error("Error clearing search buffer", extra={"error": e})
+
+
+def clear_previous_searches(session_id: str, collection_name: str = "users") -> None:
+    try:
+        session_collection = _get_sessions_collection(collection_name=collection_name)
+        session_collection.update_one(
+            {"session_id": session_id},
+            {
+                "$unset": {"previous_searches": "", "search_buffer": ""},
+                "$set": {"updated_at": datetime.utcnow()},
+            },
+        )
+    except Exception as e:
+        logger.error("Error clearing previous searches", extra={"error": e})
+
+
 def get_previous_search(session_id: str, collection_name: str = "users"):
     """Fetch the previous search results for a session.
-    Returns an empty list if none exist.
+    Returns an empty list if none exist or the latest search is past TTL.
     """
     try:
+        from qlink_chatbot.utils.search_session import filter_fresh_searches
+
         session_collection = _get_sessions_collection(collection_name=collection_name)
         session = session_collection.find_one(
             {"session_id": session_id},
             {"_id": 0, "previous_searches": 1, "previous_search": 1}
         )
+        searches = []
         if session and "previous_searches" in session:
-            return session["previous_searches"]
-        if session and "previous_search" in session:
-            return session["previous_search"]
-        return []
+            searches = session["previous_searches"] or []
+        elif session and "previous_search" in session:
+            searches = session["previous_search"] or []
+        fresh = filter_fresh_searches(searches if isinstance(searches, list) else [])
+        if searches and not fresh:
+            clear_previous_searches(session_id, collection_name=collection_name)
+        return fresh
     except Exception as e:
         logger.error("Error fetching previous search", extra={"error": e})
         raise e
+
+
+def cleanup_whatsapp_ops_collections(*, older_than_days: int = 14) -> dict:
+    """Delete old WhatsApp dedupe / outbound / status docs (ops hygiene)."""
+    from datetime import timedelta
+
+    cutoff = datetime.utcnow() - timedelta(days=max(1, older_than_days))
+    deleted = {}
+    for name, coll in (
+        ("whatsapp_processed_messages", whatsapp_processed_messages_collection),
+        ("whatsapp_outbound_events", whatsapp_outbound_events_collection),
+        ("whatsapp_status_events", whatsapp_status_events_collection),
+    ):
+        try:
+            # Prefer explicit timestamp; fall back to ObjectId generation time.
+            result = coll.delete_many({
+                "$or": [
+                    {"timestamp": {"$lt": cutoff}},
+                    {"created_at": {"$lt": cutoff}},
+                    {"_id": {"$lt": ObjectId.from_datetime(cutoff)}},
+                ]
+            })
+            deleted[name] = result.deleted_count
+        except Exception as e:
+            logger.warning(f"cleanup {name} failed: {e}")
+            deleted[name] = 0
+    return deleted
     
 def user_name(session_id: str, collection_name: str = "users"):
     """Fetch the previous search results for a session.

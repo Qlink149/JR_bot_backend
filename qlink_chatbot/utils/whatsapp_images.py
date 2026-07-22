@@ -10,6 +10,8 @@ import os
 from typing import Any
 from urllib.parse import quote
 
+# Ensure .env is loaded (side effect).
+from qlink_chatbot.utils import env_load  # noqa: F401
 from qlink_chatbot.utils.logger_config import logger
 
 
@@ -39,6 +41,7 @@ def get_whatsapp_safe_image_url(raw_url: str | None) -> str | None:
     if not normalized:
         return None
 
+    # Read at call time so tests / runtime env updates apply.
     cloud_name = (os.getenv("CLOUDINARY_CLOUD_NAME") or "").strip()
     if not cloud_name:
         logger.warning(

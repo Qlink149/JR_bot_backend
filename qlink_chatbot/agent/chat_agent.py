@@ -7,10 +7,13 @@ from openai import AsyncOpenAI
 
 from qlink_chatbot.agent.utils.chat_agent_prompts import build_system_prompt
 from qlink_chatbot.database.mongo_utils import (
+    clear_search_buffer,
     get_previous_search,
+    get_search_buffer,
     raise_alert,
     return_system_prompt,
     save_previous_search,
+    save_search_buffer,
     save_user_name,
     user_name,
 )
@@ -30,7 +33,15 @@ from qlink_chatbot.utils.jr_search_llm_extract import (
     serialise_for_json,
 )
 from qlink_chatbot.utils.logger_config import logger
-from qlink_chatbot.utils.product_format import format_product_search_message
+from qlink_chatbot.utils.product_format import (
+    format_product_search_message,
+    format_single_product_detail,
+)
+from qlink_chatbot.utils.search_session import (
+    SEARCH_PAGE_SIZE,
+    latest_search_has_results,
+)
+from qlink_chatbot.utils.search_trace import log_search_turn
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
 from qlink_chatbot.utils.support_contacts import (
     SHOP_EMAIL,
@@ -169,15 +180,24 @@ def format_recent_products_for_ai(previous_searches, max_products: int = 3) -> s
         return "[]"
 
     latest_search = previous_searches[-1] if isinstance(previous_searches, list) else {}
+    if isinstance(latest_search, dict) and latest_search.get("empty"):
+        return json.dumps({
+            "empty_search": True,
+            "keyword": latest_search.get("keyword") or "",
+            "products": [],
+            "note": "Latest search returned no products — do not answer from older rugs.",
+        })
+
     results = latest_search.get("results", []) if isinstance(latest_search, dict) else []
     if not isinstance(results, list):
         results = []
 
     compact_products = []
-    for product in results[:max_products]:
+    for idx, product in enumerate(results[:max_products], start=1):
         if not isinstance(product, dict):
             continue
         compact_products.append({
+            "ordinal": idx,
             "name": product.get("name", ""),
             "SKU": product.get("SKU", ""),
             "size": product.get("size", ""),
@@ -191,9 +211,55 @@ def format_recent_products_for_ai(previous_searches, max_products: int = 3) -> s
             "display_price": product.get("display_price", ""),
             "mrp": product.get("mrp", {}),
             "url": product.get("url", ""),
+            "size_relaxed": bool(product.get("size_relaxed")),
         })
 
     return json.dumps(compact_products)
+
+
+_PRODUCT_ORDINAL_RE = re.compile(
+    r"\b(?:the\s+)?(?P<label>1st|2nd|3rd|first|second|third|one|#?(?P<num>[1-3]))\b"
+    r"(?:\s+(?:one|rug|product|option))?",
+    re.IGNORECASE,
+)
+
+_ORDINAL_MAP = {
+    "1": 1, "1st": 1, "first": 1, "one": 1, "#1": 1,
+    "2": 2, "2nd": 2, "second": 2, "#2": 2,
+    "3": 3, "3rd": 3, "third": 3, "#3": 3,
+}
+
+
+def _resolve_product_ordinal(user_message: str) -> int | None:
+    msg = (user_message or "").strip().lower()
+    if not msg:
+        return None
+    # Prefer explicit ordinal phrases over bare "one".
+    for pattern in (
+        r"\b(?:the\s+)?(1st|first|#?1)\b",
+        r"\b(?:the\s+)?(2nd|second|#?2)\b",
+        r"\b(?:the\s+)?(3rd|third|#?3)\b",
+    ):
+        m = re.search(pattern, msg, re.IGNORECASE)
+        if m:
+            token = m.group(1).lower().lstrip("#")
+            if token.isdigit():
+                return int(token)
+            return _ORDINAL_MAP.get(token) or _ORDINAL_MAP.get(m.group(1).lower())
+    return None
+
+
+def _product_at_ordinal(previous_searches, ordinal: int) -> dict | None:
+    if not previous_searches or ordinal < 1:
+        return None
+    latest = previous_searches[-1] if isinstance(previous_searches, list) else {}
+    if not isinstance(latest, dict) or latest.get("empty"):
+        return None
+    results = latest.get("results") or []
+    if not isinstance(results, list) or ordinal > len(results):
+        return None
+    product = results[ordinal - 1]
+    return product if isinstance(product, dict) else None
 
 
 def _merge_search_with_previous(
@@ -770,13 +836,73 @@ async def _run_product_show_more(
     if not _is_product_show_more_followup(user_message, chat_history, previous_searches):
         return None
 
+    if previous_searches and not latest_search_has_results(previous_searches):
+        last_kw = _latest_search_keyword(previous_searches)
+        return (
+            f"Your last search{f' ({last_kw})' if last_kw else ''} returned no rugs. "
+            "Want to try a different color, size, material, or budget?"
+        )
+
+    # Prefer buffered pool from the last search (no re-query).
+    buffer = get_search_buffer(session_id, collection_name=collection_name)
+    buf_products = buffer.get("products") if isinstance(buffer, dict) else None
+    buf_keyword = (buffer.get("keyword") or "") if isinstance(buffer, dict) else ""
+    buf_offset = int(buffer.get("offset") or 0) if isinstance(buffer, dict) else 0
+    if isinstance(buf_products, list) and buf_products and buf_offset < len(buf_products):
+        page = buf_products[buf_offset: buf_offset + SEARCH_PAGE_SIZE]
+        if page:
+            new_offset = buf_offset + len(page)
+            save_search_buffer(
+                session_id,
+                buf_keyword or _latest_search_keyword(previous_searches),
+                buf_products,
+                offset=new_offset,
+                collection_name=collection_name,
+            )
+            save_previous_search(
+                session_id,
+                buf_keyword or _latest_search_keyword(previous_searches),
+                page,
+                collection_name=collection_name,
+            )
+            if debug_collector is not None:
+                debug_collector.append(
+                    _product_search_tool_debug(
+                        keyword=buf_keyword,
+                        keyword_sent_to_api=normalise_search_keyword(buf_keyword),
+                        currency="",
+                        products=page,
+                        extra={
+                            "follow_up": "show_more_buffer",
+                            "buffer_offset": buf_offset,
+                            "buffer_remaining": max(0, len(buf_products) - new_offset),
+                        },
+                    )
+                )
+            log_search_turn(
+                session_id=session_id,
+                search_keyword=buf_keyword,
+                products_found=len(page),
+                extra={"follow_up": "show_more_buffer"},
+            )
+            return format_product_search_message(page, more=True)
+
+        return (
+            "I've shown all rugs from that search. "
+            "Want to refine by a different size, color, material, or budget?"
+        )
+
     search_keyword, exclude_skus = _resolve_show_more_search(previous_searches, user_message)
     if not search_keyword:
-        return None
+        return (
+            "I've shown all rugs from that search. "
+            "Want to refine by a different size, color, material, or budget?"
+        )
 
     logger.info(
         f"[AGENT-GUARD] show-more keyword={search_keyword!r} exclude_skus={exclude_skus}"
     )
+    pool: list = []
     more_products = await jaipur_rugs_product_search(
         search_keyword,
         client_ip=client_ip,
@@ -784,6 +910,7 @@ async def _run_product_show_more(
         requested_currency=detected_currency,
         exclude_skus=exclude_skus or None,
         skip_llm_extraction=True,
+        pool_out=pool,
     )
     if isinstance(more_products, dict) and more_products.get("error"):
         return (
@@ -791,8 +918,19 @@ async def _run_product_show_more(
             "Would you like to try a different size, shape, or budget?"
         )
     if not isinstance(more_products, list) or not more_products:
-        return None
+        return (
+            "I've shown all rugs from that search. "
+            "Want to refine by a different size, color, material, or budget?"
+        )
 
+    full_pool = pool or more_products
+    save_search_buffer(
+        session_id,
+        search_keyword,
+        full_pool,
+        offset=len(more_products),
+        collection_name=collection_name,
+    )
     save_previous_search(
         session_id,
         search_keyword,
@@ -813,11 +951,7 @@ async def _run_product_show_more(
             )
         )
 
-    show_more_response = format_product_search_message(
-        more_products,
-        intro="Here are more rugs I found for you:",
-    )
-    return show_more_response
+    return format_product_search_message(more_products, more=True)
 
 
 async def chat_agent(
@@ -869,6 +1003,37 @@ async def chat_agent(
         )
         if show_more_reply:
             return show_more_reply
+
+        # Deterministic "1st / 2nd / 3rd one" — do not invent which rug.
+        ordinal = _resolve_product_ordinal(user_message)
+        if ordinal and (
+            _is_product_detail_followup(user_message, chat_history)
+            or re.search(r"\b(one|rug|product|option|this|that)\b", user_message or "", re.I)
+        ):
+            if previous_searches and not latest_search_has_results(previous_searches):
+                return (
+                    "Your last search returned no rugs, so I don't have a 1st/2nd/3rd "
+                    "option to open. Want to try a different color, size, or budget?"
+                )
+            product = _product_at_ordinal(previous_searches, ordinal)
+            if product:
+                return format_single_product_detail(product, ordinal=ordinal)
+            return (
+                f"I only have the rugs from the last search — there isn't a "
+                f"#{ordinal} option to show. Ask about 1st, 2nd, or 3rd, or search again."
+            )
+
+        if (
+            _is_product_detail_followup(user_message, chat_history)
+            and previous_searches
+            and not latest_search_has_results(previous_searches)
+        ):
+            last_kw = _latest_search_keyword(previous_searches)
+            return (
+                f"Your last search{f' ({last_kw})' if last_kw else ''} returned no rugs, "
+                "so I don't have product details from that ask. "
+                "Want to try a different color, size, material, or budget?"
+            )
 
         if _is_order_address_query(user_message):
             return (
@@ -1102,6 +1267,7 @@ async def chat_agent(
                             f"— args={args!r} user_message={user_message!r}"
                         )
                     llm_extract_debug: list = []
+                    pool: list = []
                     products = await jaipur_rugs_product_search(
                         keyword,
                         client_ip=client_ip,
@@ -1119,6 +1285,7 @@ async def chat_agent(
                         ),
                         skip_llm_extraction=skip_llm_extraction,
                         extraction_debug_out=llm_extract_debug,
+                        pool_out=pool,
                     )
                     memory_keyword = resolved_keyword_for_memory(
                         keyword,
@@ -1129,7 +1296,9 @@ async def chat_agent(
                         or memory_keyword
                         or normalise_search_keyword(keyword)
                     )
-                    product_count = len(products) if isinstance(products, list) else 0
+                    product_list = products if isinstance(products, list) else []
+                    is_error = isinstance(products, dict) and bool(products.get("error"))
+                    product_count = len(product_list)
                     logger.info(
                         f"[AGENT-TOOL] jaipur_rugs_product_search "
                         f"model_kw={model_keyword!r} keyword={keyword!r} "
@@ -1139,8 +1308,32 @@ async def chat_agent(
                     save_previous_search(
                         session_id,
                         memory_keyword or keyword,
-                        products,
+                        product_list,
                         collection_name=collection_name,
+                        allow_empty=is_error or product_count == 0,
+                    )
+                    if product_list:
+                        save_search_buffer(
+                            session_id,
+                            memory_keyword or keyword,
+                            pool or product_list,
+                            offset=len(product_list),
+                            collection_name=collection_name,
+                        )
+                    else:
+                        clear_search_buffer(session_id, collection_name=collection_name)
+                    size_relaxed = any(p.get("size_relaxed") for p in product_list)
+                    log_search_turn(
+                        session_id=session_id,
+                        search_keyword=memory_keyword or keyword,
+                        ignore_previous=ignore_previous,
+                        mongo_keyword=keyword_sent_to_api,
+                        size_relaxed=size_relaxed,
+                        fallback_note=next(
+                            (p.get("fallback_note") or "" for p in product_list if p.get("fallback_note")),
+                            "",
+                        ),
+                        products_found=product_count,
                     )
                     if debug_collector is not None:
                         debug_collector.append(
@@ -1148,19 +1341,21 @@ async def chat_agent(
                                 keyword=memory_keyword or keyword,
                                 keyword_sent_to_api=keyword_sent_to_api,
                                 currency=args.get("currency", ""),
-                                products=products,
+                                products=product_list,
                                 llm_extract_debug=llm_extract_debug,
                                 extra={
                                     "keyword_raw_from_model": model_keyword,
                                     "ignored_previous_search": ignore_previous,
+                                    "size_relaxed": size_relaxed,
+                                    "pool_size": len(pool or product_list),
                                 },
                             )
                         )
-                    last_product_search_result = products
+                    last_product_search_result = product_list
                     last_product_search_keyword = (
                         keyword_sent_to_api or memory_keyword or keyword or user_message
                     )
-                    output = json.dumps(products)
+                    output = json.dumps(products if not is_error else product_list)
 
                 elif item.name == "save_user_name":
                     name = args.get("name")
@@ -1253,6 +1448,7 @@ async def chat_agent(
                 f"keyword={keyword!r} ignore_previous={ignore_previous}"
             )
             llm_extract_debug: list = []
+            pool: list = []
             products = await jaipur_rugs_product_search(
                 keyword,
                 client_ip=client_ip,
@@ -1266,6 +1462,7 @@ async def chat_agent(
                     "" if ignore_previous else format_recent_chat_for_ai(chat_history, limit=4)
                 ),
                 extraction_debug_out=llm_extract_debug,
+                pool_out=pool,
             )
             memory_keyword = resolved_keyword_for_memory(
                 keyword,
@@ -1276,12 +1473,33 @@ async def chat_agent(
                 or memory_keyword
                 or normalise_search_keyword(keyword)
             )
-            product_count = len(products) if isinstance(products, list) else 0
+            product_list = products if isinstance(products, list) else []
+            is_error = isinstance(products, dict) and bool(products.get("error"))
             save_previous_search(
                 session_id,
                 memory_keyword or keyword,
-                products,
+                product_list,
                 collection_name=collection_name,
+                allow_empty=is_error or not product_list,
+            )
+            if product_list:
+                save_search_buffer(
+                    session_id,
+                    memory_keyword or keyword,
+                    pool or product_list,
+                    offset=len(product_list),
+                    collection_name=collection_name,
+                )
+            else:
+                clear_search_buffer(session_id, collection_name=collection_name)
+            log_search_turn(
+                session_id=session_id,
+                search_keyword=memory_keyword or keyword,
+                ignore_previous=ignore_previous,
+                mongo_keyword=keyword_sent_to_api,
+                size_relaxed=any(p.get("size_relaxed") for p in product_list),
+                products_found=len(product_list),
+                extra={"forced": True},
             )
             if debug_collector is not None:
                 debug_collector.append(
@@ -1289,13 +1507,13 @@ async def chat_agent(
                         keyword=memory_keyword or keyword,
                         keyword_sent_to_api=keyword_sent_to_api,
                         currency=detected_currency,
-                        products=products,
+                        products=product_list,
                         llm_extract_debug=llm_extract_debug,
                         extra={"forced": True},
                     )
                 )
             return format_product_search_message(
-                products if isinstance(products, list) else [],
+                product_list,
                 no_results_keyword=keyword_sent_to_api or keyword or user_message,
             )
 

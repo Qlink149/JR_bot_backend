@@ -73,6 +73,19 @@ image headers. Same as Kisna: set on the Vultr container `.env`:
 ```text
 CLOUDINARY_CLOUD_NAME=your_cloud_name_here
 WHATSAPP_OUTBOUND_GAP_SECONDS=0.45
+LOG_LEVEL=INFO
 ```
 
 Only the cloud name is required (Cloudinary Fetch → JPEG). Redeploy after setting.
+
+Smoke check (local or on host):
+
+```bash
+python scripts/verify_whatsapp_images.py
+```
+
+Optional weekly ops cleanup:
+
+```bash
+python scripts/cleanup_whatsapp_ops.py --days 14
+```

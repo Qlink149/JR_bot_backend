@@ -34,6 +34,49 @@ from qlink_chatbot.utils.jr_search_recommendation import (
     select_top_products,
 )
 from qlink_chatbot.utils.logger_config import logger
+from qlink_chatbot.utils.search_session import SEARCH_PAGE_SIZE, SEARCH_POOL_SIZE
+
+
+def _copy_attribute_filters(attribute_filters: dict) -> dict:
+    out = {}
+    for key, values in (attribute_filters or {}).items():
+        out[key] = set(values) if isinstance(values, (set, list, tuple)) else values
+    return out
+
+
+def _strip_values_from_keyword(keyword: str, values) -> str:
+    drop = {str(v).strip().lower() for v in (values or []) if v}
+    if not drop:
+        return keyword or ""
+    kept = [
+        part.strip()
+        for part in (keyword or "").split("&")
+        if part.strip() and part.strip().lower() not in drop
+    ]
+    return "&".join(kept)
+
+
+def _widen_price_filter(price_filter: dict | None, factor: float = 1.25) -> dict | None:
+    if not price_filter:
+        return None
+    out = dict(price_filter)
+    if "amount" in out and out["amount"] is not None:
+        out["amount"] = int(float(out["amount"]) * factor)
+    if "max_amount" in out and out["max_amount"] is not None:
+        out["max_amount"] = int(float(out["max_amount"]) * factor)
+    if "min_amount" in out and out["min_amount"] is not None:
+        out["min_amount"] = int(float(out["min_amount"]) / factor)
+    return out
+
+
+def _filters_without_keys(attribute_filters: dict, *keys: str) -> dict:
+    out = _copy_attribute_filters(attribute_filters)
+    for key in keys:
+        if key in out and isinstance(out[key], set):
+            out[key] = set()
+        elif key in out:
+            out[key] = None
+    return out
 
 # Kept for dashboard_routes imports
 product_color_collection = db["product_color"]
@@ -74,8 +117,17 @@ async def jaipur_rugs_product_search(
     chat_context: str = "",
     skip_llm_extraction: bool = False,
     extraction_debug_out: list | None = None,
+    pool_out: list | None = None,
+    page_size: int | None = None,
+    pool_size: int | None = None,
 ):
-    """Search products from MongoDB (synced Product Master)."""
+    """Search products from MongoDB (synced Product Master).
+
+    Returns the first ``page_size`` products. When ``pool_out`` is provided,
+    the full ranked pool (up to ``pool_size``) is appended for show-more buffer.
+    """
+    page_size = page_size if page_size is not None else SEARCH_PAGE_SIZE
+    pool_size = pool_size if pool_size is not None else SEARCH_POOL_SIZE
     try:
         keyword = (keyword or "").strip()
         llm_extraction_debug = None
@@ -191,6 +243,7 @@ async def jaipur_rugs_product_search(
             skip_color_post_filter=color_prefiltered,
         )
         size_relaxed = bool((pipeline_meta or {}).get("size_relaxed"))
+        fallback_note = ""
 
         # Prefer catalog-label color at nearby sizes over yarn-% matches at exact size.
         size_requested = bool(
@@ -240,6 +293,68 @@ async def jaipur_rugs_product_search(
                         f"tier={color_search_tier!r} n={len(unique_results)}"
                     )
 
+        # Progressive filter relax (room → construction → material → price widen).
+        if not unique_results:
+            relax_steps = (
+                ("room", "Broadened search by dropping the room filter."),
+                ("construction", "Broadened search by dropping the construction filter."),
+                ("material", "Broadened search by dropping the material filter."),
+            )
+            working_filters = _copy_attribute_filters(attribute_filters)
+            working_keyword = clean_keyword
+            working_price = price_filter
+            for drop_key, note in relax_steps:
+                values = working_filters.get(drop_key) or set()
+                if not values:
+                    continue
+                working_filters = _filters_without_keys(working_filters, drop_key)
+                working_keyword = _strip_values_from_keyword(working_keyword, values)
+                if working_keyword:
+                    raw_fb, color_pre_fb = await asyncio.to_thread(
+                        mongo_search_products,
+                        working_keyword,
+                    )
+                else:
+                    raw_fb = raw_results
+                    color_pre_fb = color_prefiltered
+                fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
+                    apply_search_pipeline,
+                    raw_fb,
+                    color_check_terms=color_check_terms,
+                    attribute_filters=working_filters,
+                    price_filter=working_price,
+                    exclude_skus=exclude_skus,
+                    skip_color_post_filter=color_pre_fb,
+                )
+                if fb_results:
+                    unique_results = fb_results
+                    color_search_tier = fb_tier
+                    fallback_note = note
+                    logger.info(
+                        f"[SEARCH] progressive fallback dropped={drop_key} "
+                        f"n={len(unique_results)}"
+                    )
+                    break
+
+            if not unique_results and working_price:
+                widened = _widen_price_filter(working_price, 1.25)
+                fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
+                    apply_search_pipeline,
+                    raw_results,
+                    color_check_terms=color_check_terms,
+                    attribute_filters=working_filters,
+                    price_filter=widened,
+                    exclude_skus=exclude_skus,
+                    skip_color_post_filter=color_prefiltered,
+                )
+                if fb_results:
+                    unique_results = fb_results
+                    color_search_tier = fb_tier
+                    fallback_note = "No exact budget match — showing a slightly wider price range."
+                    logger.info(
+                        f"[SEARCH] progressive fallback widened price n={len(unique_results)}"
+                    )
+
         if not unique_results:
             logger.warning("[SEARCH] 0 products after filters")
             return {"error": "No products found."}
@@ -276,11 +391,11 @@ async def jaipur_rugs_product_search(
             color_search_tier=color_search_tier,
             size_terms=attribute_filters.get("size") or set(),
             size_relaxed=size_relaxed,
-            limit=3,
+            limit=pool_size,
         )
         logger.info(
             f"[SEARCH] selected {len(selected)} product(s) by color relevance "
-            f"(pool={len(displayable)})"
+            f"(pool={len(displayable)} page_size={page_size})"
         )
 
         currency = requested_currency or ""
@@ -328,6 +443,8 @@ async def jaipur_rugs_product_search(
                 f"tier={reason['color_search_tier']!r} — {reason['summary']}"
             )
 
+            if fallback_note:
+                reason = {**reason, "fallback_note": fallback_note}
             formatted.append({
                 "url": f"https://www.jaipurrugs.com/in/rugs/{p.get('ProductURL')}?barcode={barcode}",
                 "price": {"currency": currency, "amount": price_amount},
@@ -335,6 +452,8 @@ async def jaipur_rugs_product_search(
                 "display_price": display_price,
                 "price_source_field": currency_field,
                 "color_search_tier": color_search_tier,
+                "size_relaxed": size_relaxed,
+                "fallback_note": fallback_note,
                 "name": (p.get("Name") or p.get("Collection") or "").strip(),
                 "SKU": sku,
                 "collection": p.get("Collection", ""),
@@ -369,6 +488,11 @@ async def jaipur_rugs_product_search(
                 },
             })
 
+        if pool_out is not None:
+            pool_out.extend(formatted)
+
+        page = formatted[: max(1, page_size)]
+
         final_log = [
             {
                 "SKU": i["SKU"],
@@ -387,12 +511,15 @@ async def jaipur_rugs_product_search(
                 "breakdown_matched": i["recommendation_reason"]["breakdown_matched_percentages"],
                 "why_recommended": i["recommendation_reason"]["summary"],
             }
-            for i in formatted
+            for i in page
         ]
         logger.info(f"[SEARCH] final payload: {final_log}")
-        logger.info(f"[SEARCH] recommendation detail: {recommendation_reasons}")
-        logger.info(f"[SEARCH] returning {len(formatted)} product(s) for keyword={keyword!r}")
-        return formatted
+        logger.info(f"[SEARCH] recommendation detail: {recommendation_reasons[:len(page)]}")
+        logger.info(
+            f"[SEARCH] returning {len(page)} product(s) "
+            f"(pool={len(formatted)}) for keyword={keyword!r}"
+        )
+        return page
 
     except Exception as e:
         logger.error(f"[SEARCH] unexpected error: {e}")
