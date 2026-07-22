@@ -9,6 +9,7 @@ from qlink_chatbot.utils.env_load import (
     qlink_gupshup_partner_app_token,
 )
 from qlink_chatbot.utils.logger_config import logger
+from qlink_chatbot.whatsapp_functions.media.send_image import send_image_message
 
 _MAX_BODY_LENGTH = 1024
 PARTNER_BASE_URL = "https://partner.gupshup.io"
@@ -40,6 +41,9 @@ def send_interactive_cta_message(phone_number: str, bot_response: dict):
 
     If bot_response contains image_url, the image is sent as the message header
     so image and button arrive as one atomic message (no ordering race condition).
+
+    On failure with an image header, falls back to a plain captioned image
+    (Kisna-style) so one bad CDN URL does not kill the whole product carousel.
     """
     logger.info(
         "Sending interactive CTA message",
@@ -86,8 +90,13 @@ def send_interactive_cta_message(phone_number: str, bot_response: dict):
     }
 
     try:
-        response = httpx.post(url, headers=headers, data=data)
-        response.raise_for_status()
+        response = httpx.post(url, headers=headers, data=data, timeout=30.0)
+        if response.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"Gupshup CTA failed: {response.status_code}",
+                request=response.request,
+                response=response,
+            )
         response_payload = response.json()
         _save_outbound_event(
             phone_number,
@@ -121,4 +130,18 @@ def send_interactive_cta_message(phone_number: str, bot_response: dict):
             "Error sending interactive CTA message",
             extra={"phone_number": phone_number, "error": str(e)},
         )
+        # Kisna-style: if image header CTA fails, still deliver the product image.
+        if image_url:
+            logger.warning(
+                "CTA with image failed — falling back to plain image",
+                extra={"phone_number": phone_number, "image_url": image_url},
+            )
+            caption = body_text
+            button_url = (bot_response.get("button_url") or "").strip()
+            if button_url and button_url not in caption:
+                caption = f"{caption}\n{button_url}"[:_MAX_BODY_LENGTH]
+            return send_image_message(
+                phone_number=phone_number,
+                bot_response={"image_url": image_url, "caption": caption},
+            )
         raise e

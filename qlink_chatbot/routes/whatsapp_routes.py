@@ -21,6 +21,7 @@ from qlink_chatbot.utils.support_contacts import (
     country_from_phone,
     general_support_phone,
 )
+from qlink_chatbot.utils.whatsapp_images import get_whatsapp_safe_image_url
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 from qlink_chatbot.whatsapp_functions.send_typing_indicator import typing_indicator_loop
 
@@ -40,6 +41,8 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
 _MD_SEARCH_MORE = re.compile(r'\[🔍 Search More Rugs\]\([^)]+\)', re.IGNORECASE)
 _MD_EMPHASIS = re.compile(r'(\*{1,2})([^*\n]+)\1')
 _MD_HEADER = re.compile(r'^#{1,6}\s+', re.MULTILINE)
+# Strip markdown images first (WhatsApp cannot render ![alt](url) as media).
+_MD_IMAGE = re.compile(r'!\[[^\]]*\]\([^)]+\)')
 _MD_LINK = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
 _MD_BULLET = re.compile(r'^- ', re.MULTILINE)
 
@@ -63,6 +66,10 @@ def _markdown_to_whatsapp(text: str) -> str:
     # Remove the "Search More Rugs" CTA — sent as a separate button
     text = _MD_SEARCH_MORE.sub('', text).strip()
 
+    # Drop markdown images — they never render as media on WhatsApp
+    # (product images are sent as interactive CTA headers separately).
+    text = _MD_IMAGE.sub('', text)
+
     # Convert **bold** → *bold* and *italic* → _italic_ in one pass
     def _convert_emphasis(m: re.Match) -> str:
         markers, content = m.group(1), m.group(2)
@@ -83,7 +90,22 @@ def _markdown_to_whatsapp(text: str) -> str:
     # Convert markdown bullet lists to WhatsApp style
     text = _MD_BULLET.sub('• ', text)
 
+    # Collapse blank lines left by stripped images
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
     return text.strip()
+
+
+def _whatsapp_text_after_product_cards(ai_text: str) -> str:
+    """Short intro when product CTA cards already carry the details + images."""
+    text = _markdown_to_whatsapp(ai_text or "")
+    if not text:
+        return "Here are some rugs I found for you:"
+    # Prefer the first short paragraph without product URLs / leftover link dumps.
+    first = text.split("\n\n")[0].strip()
+    if first and "http" not in first.lower() and len(first) <= 220:
+        return first
+    return "Here are some rugs I found for you:"
 
 
 def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
@@ -96,7 +118,8 @@ def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
             continue
 
         name = (product.get("name") or product.get("collection") or "Jaipur Rug").strip()
-        image_url = product.get("image", "")
+        raw_image = product.get("image") or product.get("image_url") or ""
+        image_url = get_whatsapp_safe_image_url(raw_image)
         url = product.get("url", "")
         size = product.get("size", "")
         material = (product.get("material") or product.get("fabric", "")).strip()
@@ -132,6 +155,10 @@ def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
                 "button_text": "View Product",
             })
         elif url:
+            if raw_image and not image_url:
+                logger.warning(
+                    f"[WA] Skipping invalid product image for {name!r}: {raw_image!r}"
+                )
             messages.append({
                 "type": "interactive_cta",
                 "button_url": url,
@@ -376,21 +403,36 @@ async def _process_message(request_data: dict) -> None:
             new_products_found = searches_after and len(searches_after) > count_before
             logger.info(f"[WA] Product search triggered={new_products_found} (before={count_before} after={len(searches_after) if searches_after else 0})")
 
+            product_cards_sent = False
             if new_products_found:
                 latest_products = (searches_after[-1] or {}).get("results", [])
                 if latest_products:
-                    logger.info(f"[WA] Sending {len(latest_products)} product CTA card(s) to {phone_number}")
-                    responses.extend(_format_products_for_whatsapp(latest_products, currency))
+                    product_cards = _format_products_for_whatsapp(latest_products, currency)
+                    logger.info(
+                        f"[WA] Sending {len(product_cards)} product CTA card(s) "
+                        f"to {phone_number}"
+                    )
+                    responses.extend(product_cards)
                     responses.append({
                         "type": "interactive_cta",
                         "button_url": "https://www.jaipurrugs.com/in/search",
                         "caption": "Browse the full collection on our website.",
                         "button_text": "Search More Rugs",
                     })
+                    product_cards_sent = bool(product_cards)
 
-            wa_text = _markdown_to_whatsapp(ai_text or "")
+            # When CTA cards carry images + details, don't dump markdown product
+            # blocks (including broken ![Rug Image] lines) into the text reply.
+            if product_cards_sent:
+                wa_text = _whatsapp_text_after_product_cards(ai_text or "")
+            else:
+                wa_text = _markdown_to_whatsapp(ai_text or "")
             if wa_text:
-                responses.append({"type": "text", "text": wa_text})
+                # Intro text first, then product cards (Kisna-style ordering).
+                if product_cards_sent:
+                    responses.insert(0, {"type": "text", "text": wa_text})
+                else:
+                    responses.append({"type": "text", "text": wa_text})
 
             logger.info(f"[WA-OUT] phone={phone_number} dispatching {len(responses)} message(s): types={[r.get('type') for r in responses]}")
 

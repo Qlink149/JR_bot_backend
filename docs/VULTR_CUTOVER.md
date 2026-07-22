@@ -64,3 +64,15 @@ python scripts/backfill_search_tokens.py --rebuild-all --batch-size 2000
 
 - Do not run `sync.bat` (removed).
 - Do not push production fixes to the separate `whatsapp` / Vercel backend remote.
+
+## 7. WhatsApp product images (Cloudinary)
+
+Gupshup/Meta often cannot fetch raw `images.jaipurrugs.com` URLs into interactive
+image headers. Same as Kisna: set on the Vultr container `.env`:
+
+```text
+CLOUDINARY_CLOUD_NAME=your_cloud_name_here
+WHATSAPP_OUTBOUND_GAP_SECONDS=0.45
+```
+
+Only the cloud name is required (Cloudinary Fetch → JPEG). Redeploy after setting.

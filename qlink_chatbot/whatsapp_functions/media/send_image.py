@@ -51,7 +51,14 @@ def send_image_message(phone_number: str, bot_response: dict):
         "token": qlink_gupshup_partner_app_token,
     }
 
-    image_payload = {"link": bot_response.get("image_url")}
+    # Accept image_url (JR) or url (Kisna-style fallback callers).
+    image_link = (
+        bot_response.get("image_url")
+        or bot_response.get("url")
+        or bot_response.get("link")
+        or ""
+    )
+    image_payload = {"link": image_link}
     if bot_response.get("caption"):
         image_payload["caption"] = bot_response.get("caption", "")
 

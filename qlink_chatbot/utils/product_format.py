@@ -10,14 +10,17 @@ def format_product_search_message(
     """Render product cards without a second LLM call."""
     if not products:
         keyword = (no_results_keyword or "").strip()
+        # Kisna-style: never invent products; nudge a concrete next filter.
         if keyword:
             return (
-                f"I couldn't find any rugs matching {keyword!r}. "
-                "Would you like to try a different color, size, or style?"
+                f"I couldn't find an exact match for {keyword!r}. "
+                "Want to try a different color, size, material, or budget — "
+                "or browse the full collection on jaipurrugs.com?"
             )
         return (
-            "I couldn't find any rugs matching that search. "
-            "Would you like to try a different color, size, or style?"
+            "I couldn't find an exact match for that. "
+            "Want to try a different color, size, material, or budget — "
+            "or browse the full collection on jaipurrugs.com?"
         )
 
     blocks: list[str] = []
