@@ -188,6 +188,67 @@ def summarise_normalise_result(
     }
 
 
+_REFINEMENT_HINT = re.compile(
+    r"\b(also|instead|same|that|those|these|from (the )?last|more like|show more|"
+    r"but (in|with|for)|keep (the|my))\b",
+    re.IGNORECASE,
+)
+
+
+def _should_ignore_previous_search(keyword: str, user_message: str = "") -> bool:
+    """True for fresh mega-menu browses (new arrival / bestsellers / …).
+
+    Prevents previous purple/size/material filters from being AND-merged into
+    a brand-new category ask.
+    """
+    text = (user_message or keyword or "").strip()
+    if not text:
+        return False
+    if _REFINEMENT_HINT.search(text):
+        return False
+    _pf, _clean, _colors, attrs = normalise_keyword(text)
+    return bool(attrs.get("catalog_tag"))
+
+
+def _sanitize_attrs_to_current_message(
+    attrs: dict,
+    *,
+    keyword: str,
+    user_message: str,
+) -> dict:
+    """Drop previous-search bleed; keep only attrs evidenced in the current ask."""
+    clean: dict[str, Any] = {
+        "colors": [],
+        "shapes": [],
+        "sizes_ft": [],
+        "sizes_cm": [],
+        "size_categories": [],
+        "materials": [],
+        "constructions": [],
+        "patterns": [],
+        "rooms": [],
+        "catalog_tags": list(attrs.get("catalog_tags") or []),
+        "multicolor": False,
+        "weight_max_kg": None,
+        "price": None,
+        "sku": attrs.get("sku"),
+        "collection": attrs.get("collection"),
+        "refinement": "new",
+    }
+    clean, notes = backfill_attrs_from_regex(
+        clean,
+        keyword=keyword,
+        user_message=user_message,
+    )
+    # Preserve LLM catalog_tags if backfill missed a phrase variant.
+    for tag in attrs.get("catalog_tags") or []:
+        if tag not in clean["catalog_tags"]:
+            clean["catalog_tags"].append(tag)
+    if notes:
+        logger.info(f"[LLM-EXTRACT] sanitized fresh catalog_tag browse: {notes}")
+    return clean
+
+
 def _alias_hit_in_keyword(keyword: str) -> bool:
     """True if keyword contains a known catalog alias token."""
     lower = (keyword or "").lower()
@@ -822,6 +883,9 @@ CATALOG TAG RULES (website mega-menu)
 - antique rugs → catalog_tags=["antique"]
 - rug swatch / swatches → catalog_tags=["swatch"]
 - outdoor rugs → catalog_tags=["outdoor"] (NOT rooms — Outdoor is a product tag)
+- Fresh mega-menu browse (e.g. only "new arrival rugs" / "bestsellers"): set refinement="new"
+  and do NOT copy colors/sizes/materials/rooms from PREVIOUS SEARCH KEYWORD.
+  Previous search is for refine_previous / show_more only (also / same / but in blue / show more).
 
 PRICE RULES
 - Any budget/price/cost/above/under/over/below/between/k/lakh/lac/cr → has_price_filter=true.
@@ -1071,7 +1135,7 @@ def _attrs_have_searchable_content(attrs: dict) -> bool:
         return True
     for key in (
         "colors", "shapes", "sizes_ft", "sizes_cm", "size_categories",
-        "materials", "constructions", "patterns", "rooms",
+        "materials", "constructions", "patterns", "rooms", "catalog_tags",
     ):
         if attrs.get(key):
             return True
@@ -1110,16 +1174,33 @@ async def resolve_keyword_with_llm_extraction(
         logger.info(f"[LLM-EXTRACT] skip mode={mode} reason={reason} keyword={kw!r}")
         return kw, {"ran": False, "mode": mode, "reason": reason}
 
+    ignore_previous = _should_ignore_previous_search(kw, user_message or source)
+    prev_for_llm = "" if ignore_previous else previous_search_keyword
+    context_for_llm = "" if ignore_previous else chat_context
+    if ignore_previous and previous_search_keyword:
+        logger.info(
+            f"[LLM-EXTRACT] ignoring previous_search for fresh catalog_tag browse "
+            f"prev={previous_search_keyword!r}"
+        )
+
     logger.info(f"[LLM-EXTRACT] run mode={mode} reason={reason} keyword_in={kw!r} source={source!r}")
     attrs, dropped = await extract_search_attributes(
         source,
         keyword=kw,
-        previous_search_keyword=previous_search_keyword,
-        chat_context=chat_context,
+        previous_search_keyword=prev_for_llm,
+        chat_context=context_for_llm,
         detected_currency=detected_currency,
         country_code=country_code,
         llm_primary=(mode == "llm_primary"),
     )
+
+    if ignore_previous:
+        attrs = _sanitize_attrs_to_current_message(
+            attrs,
+            keyword=kw,
+            user_message=source,
+        )
+        dropped = list(dropped) + ["sanitized:fresh_catalog_tag_browse"]
 
     if not _attrs_have_searchable_content(attrs):
         logger.warning(f"[LLM-EXTRACT] no searchable content after validation dropped={dropped}")
@@ -1149,6 +1230,7 @@ async def resolve_keyword_with_llm_extraction(
             "dropped_fields": dropped,
             "attributes": attrs,
             "llm_raw_price": attrs.get("price"),
+            "ignored_previous_search": ignore_previous,
         }
 
     prefer_llm_price = (

@@ -18,6 +18,12 @@ from qlink_chatbot.utils.jr_search_mongo import (
     classify_segment,
     product_matches_catalog_tag,
 )
+from qlink_chatbot.utils.jr_search_llm_extract import (
+    _attrs_have_searchable_content,
+    _sanitize_attrs_to_current_message,
+    _should_ignore_previous_search,
+    build_search_payload_from_attrs,
+)
 from qlink_chatbot.utils.jr_search_sizes import (
     product_matches_size_category,
     product_matches_size_term,
@@ -140,3 +146,48 @@ def test_shop_by_combo_extract():
     assert "wool" in (attrs.get("material") or set())
     assert "living room" in (attrs.get("room") or set())
     assert "hand knotted" in (attrs.get("construction") or set())
+
+
+def test_fresh_new_arrival_ignores_previous_search():
+    assert _should_ignore_previous_search("new arrival", "new arrival rugs") is True
+    assert _should_ignore_previous_search("bestsellers", "bestsellers") is True
+    # Refinement language keeps previous context.
+    assert _should_ignore_previous_search(
+        "blue", "same but in blue"
+    ) is False
+
+
+def test_sanitize_strips_previous_bleed_from_new_arrival():
+    polluted = {
+        "colors": ["purple"],
+        "shapes": [],
+        "sizes_ft": ["6x9"],
+        "sizes_cm": [],
+        "size_categories": [],
+        "materials": ["wool", "tencil"],
+        "constructions": [],
+        "patterns": [],
+        "rooms": [],
+        "catalog_tags": ["new"],
+        "multicolor": False,
+        "weight_max_kg": None,
+        "price": None,
+        "sku": None,
+        "collection": None,
+        "refinement": "refine_previous",
+    }
+    clean = _sanitize_attrs_to_current_message(
+        polluted,
+        keyword="new arrival",
+        user_message="new arrival rugs",
+    )
+    assert clean["catalog_tags"] == ["new"]
+    assert clean["colors"] == []
+    assert clean["sizes_ft"] == []
+    assert clean["materials"] == []
+    assert clean["refinement"] == "new"
+    assert _attrs_have_searchable_content(clean) is True
+    payload = build_search_payload_from_attrs(clean)
+    assert payload["clean_keyword"] == "new"
+    assert payload["attribute_filters"]["catalog_tag"] == {"new"}
+    assert not payload["attribute_filters"].get("color_exact")
