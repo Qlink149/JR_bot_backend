@@ -719,10 +719,13 @@ def _website_product_sync_doc(product: dict) -> dict | None:
 def _bulk_sync_website_products(products: list[dict]) -> dict:
     from qlink_chatbot.utils.jr_search_index import ensure_product_search_indexes
     from qlink_chatbot.utils.jr_search_color_breakdown import load_breakdown_colors_for_sku
+    from qlink_chatbot.utils.logger_config import logger
 
     ensure_product_search_indexes()
     synced = 0
     skipped = 0
+    with_tokens = 0
+    seen_barcodes: set[str] = set()
     operations = []
 
     def flush_operations() -> None:
@@ -736,12 +739,16 @@ def _bulk_sync_website_products(products: list[dict]) -> dict:
         if not doc:
             skipped += 1
             continue
+        barcode = str(doc["BarCode"])
+        seen_barcodes.add(barcode)
         sku = doc.get("SKU")
         if sku:
             doc["breakdown_colors"] = load_breakdown_colors_for_sku(str(sku))
+        if doc.get("search_tokens"):
+            with_tokens += 1
         operations.append(
             UpdateOne(
-                {"BarCode": doc["BarCode"]},
+                {"BarCode": barcode},
                 {"$set": doc, "$setOnInsert": {"created_at": datetime.utcnow()}},
                 upsert=True,
             )
@@ -751,15 +758,39 @@ def _bulk_sync_website_products(products: list[dict]) -> dict:
             flush_operations()
 
     flush_operations()
-    return {"synced": synced, "skipped": skipped}
+
+    deleted = 0
+    if seen_barcodes:
+        delete_result = website_products_collection.delete_many(
+            {"BarCode": {"$nin": list(seen_barcodes)}}
+        )
+        deleted = int(delete_result.deleted_count or 0)
+
+    sample = website_products_collection.find_one(
+        {"flags.inStock": True, "search_tokens.0": {"$exists": True}},
+        {"BarCode": 1, "search_tokens": 1},
+    )
+    logger.info(
+        f"[SYNC] products synced={synced} skipped={skipped} with_tokens={with_tokens} "
+        f"deleted_orphans={deleted} sample_barcode="
+        f"{(sample or {}).get('BarCode')!r} sample_token_n="
+        f"{len((sample or {}).get('search_tokens') or [])}"
+    )
+    return {
+        "synced": synced,
+        "skipped": skipped,
+        "with_tokens": with_tokens,
+        "deleted_orphans": deleted,
+        "token_sample_ok": bool(sample and (sample.get("search_tokens") or [])),
+    }
 
 
 @dashboard_router.post("/backfill-search-tokens")
-def backfill_product_search_tokens(batch_size: int = 1000):
-    """One-time helper to index search_tokens on existing MongoDB product docs."""
+def backfill_product_search_tokens(batch_size: int = 1000, rebuild_all: bool = False):
+    """Index search_tokens on Mongo product docs (loop until remaining_without_tokens=0)."""
     from qlink_chatbot.utils.jr_search_index import backfill_search_tokens
 
-    return backfill_search_tokens(batch_size=batch_size)
+    return backfill_search_tokens(batch_size=batch_size, rebuild_all=rebuild_all)
 
 
 @dashboard_router.post("/sync-products")
@@ -786,13 +817,15 @@ _CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 @dashboard_router.get("/cron/sync-products")
 async def cron_sync_products(authorization: str = Header(default="")):
-    """Called by Vercel Cron on a schedule to keep the products collection fresh.
+    """Daily Product Master sync (call from Vultr host cron).
 
-    Vercel sends: Authorization: Bearer <CRON_SECRET>
-    Set CRON_SECRET in Vercel env vars.
+    Authorization: Bearer <CRON_SECRET>
+    CRON_SECRET must be set on the backend; empty secret is rejected.
     """
+    if not _CRON_SECRET:
+        raise HTTPException(status_code=503, detail="CRON_SECRET is not configured")
     expected = f"Bearer {_CRON_SECRET}"
-    if _CRON_SECRET and authorization != expected:
+    if authorization != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     products = await _jr_get_all_products()

@@ -30,13 +30,17 @@ def format_product_search_message(
             heading = f"**{name}**"
         size = product.get("size") or product.get("size_cm") or "Size unavailable"
         material = product.get("material") or "Material unavailable"
+        fabric = (product.get("fabric") or "").strip()
         price = product.get("display_price") or "Price unavailable"
         url = product.get("url") or ""
         image = product.get("image") or ""
+        material_line = f"- Material: {material}"
+        if fabric and fabric.lower() != material.lower():
+            material_line += f"\n- Composition: {fabric}"
         blocks.append(
             f"{heading}\n"
             f"- Size: {size}\n"
-            f"- Material: {material}\n"
+            f"{material_line}\n"
             f"- Price: {price}\n"
             f"- [🛒 View Product]({url})\n"
             f"- ![Rug Image]({image})"

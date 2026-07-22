@@ -27,6 +27,7 @@ from qlink_chatbot.utils.jr_search_llm_extract import serialise_for_json
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.product_format import format_product_search_message
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
+from qlink_chatbot.utils.support_contacts import general_support_phone, support_contacts_blurb
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
@@ -119,13 +120,21 @@ tools = [
     {
         "type": "function",
         "name": "raise_agent_alert",
-        "description": "Raise an alert for a human agent to take over when the assistant cannot answer or needs support.",
+        "description": "Raise an alert for a human agent to take over when the assistant cannot answer, needs support, or the user wants a callback. For callbacks, always include callback_phone when the user shared a number.",
         "parameters": {
             "type": "object",
             "properties": {
                 "alert": {
                     "type": "string",
                     "description": "Short one-line description of why agent assistance is needed."
+                },
+                "callback_phone": {
+                    "type": "string",
+                    "description": "Phone number the user wants to be called on (include country code if provided)."
+                },
+                "callback_requested": {
+                    "type": "boolean",
+                    "description": "True when the user asked for a phone callback."
                 }
             },
             "required": ["alert"]
@@ -415,6 +424,8 @@ def _is_new_product_search_request(user_message: str, chat_history, previous_sea
         return False
     if _is_rug_pad_query(user_message) or _is_order_address_query(user_message):
         return False
+    if _is_short_affirmative(user_message):
+        return False
     msg = (user_message or "").lower().strip()
     if _SEARCH_INTENT_RE.search(msg):
         return True
@@ -425,12 +436,45 @@ def _is_new_product_search_request(user_message: str, chat_history, previous_sea
     rug_terms = ("rug", "rugs", "carpet", "carpets")
     return any(v in msg for v in search_verbs) and any(t in msg for t in rug_terms)
 
-def agent_alert_tool(alert, sesson_id):
+
+_AFFIRMATIVE_RE = re.compile(
+    r"^\s*(yes|yeah|yep|yup|sure|ok|okay|please|go ahead|tell me more|"
+    r"know more|more please|interested)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_short_affirmative(user_message: str) -> bool:
+    return bool(_AFFIRMATIVE_RE.match((user_message or "").strip()))
+
+
+def _last_assistant_asks_followup(chat_history) -> bool:
+    text = (_last_assistant_message(chat_history) or "").lower()
+    if not text:
+        return False
+    cues = (
+        "would you like", "want to know more", "know more", "tell you more",
+        "shall i", "should i", "interested", "learn more", "more about",
+        "connect you", "callback", "call you",
+    )
+    return any(c in text for c in cues)
+
+def agent_alert_tool(
+    alert,
+    sesson_id,
+    callback_phone: str = "",
+    callback_requested: bool = False,
+    collection_name: str = "users",
+):
     """Tool function to raise an agent alert"""
     try:
+        channel = "whatsapp" if collection_name == "users_whatsapp" else "web"
         raise_alert(
             session_id=sesson_id,
-            alert_body=alert
+            alert_body=alert,
+            callback_phone=(callback_phone or "").strip(),
+            callback_requested=bool(callback_requested or callback_phone),
+            channel=channel,
         )
     except Exception:
         logger.error("Error occured while using agent alert tool call.")
@@ -806,11 +850,16 @@ async def chat_agent(
             )
 
         if _is_rug_pad_query(user_message):
+            from qlink_chatbot.utils.support_contacts import (
+                SHOP_EMAIL,
+                general_support_phone,
+            )
+            support_phone = general_support_phone(country_code, session_id)
             return (
                 "Yes, we sell custom anti-slip mats (rug pads) tailored to your rug size. They help "
                 "with slip resistance, floor protection, cushioning, and longer rug life. "
                 "Learn more: https://www.jaipurrugs.com/in/know-your-rug/about-rug-pads. "
-                "For sizing or purchase help, contact shop@jaipurrugs.com or +91 8000295928 "
+                f"For sizing or purchase help, contact {SHOP_EMAIL} or {support_phone} "
                 "(WhatsApp available)."
             )
 
@@ -847,16 +896,28 @@ async def chat_agent(
                 "content": f"user name: {user_name(session_id=session_id, collection_name=collection_name)}",
             },
             {"role": "developer", "content": "Never produce filler text like 'searching...' or 'one moment please'. If a tool is needed, directly call the tool without any extra wording."},
-            {"role": "developer", "content": "STRICT CONTACT RULE — use ONLY these customer-service contacts (not store showroom numbers): General: shop@jaipurrugs.com | After-sales / tracking: order-update@jaipurrugs.com, +91 7665017083 | Repair / care / washing / services: rugcare@jaipurrugs.com, +91 9039195506 | India general: +91 8000295928 | International: +91 7412 060 022."},
+            {
+                "role": "developer",
+                "content": support_contacts_blurb(country_code, session_id),
+            },
             {"role": "developer", "content": "When responding: do not add any narrative, status updates, waiting messages, politeness fillers, or redundant sentences. Either answer directly or call a tool directly."},
             {"role": "developer", "content": "In greeting or welcome-style replies, ask the customer what rug size they are looking for. For follow-up size questions after products were shown, answer from Latest shown products context when possible. If the user mentions size but does not identify the product, ask which product they mean and what size they prefer."},
             {"role": "developer", "content": "For ANY question about stores, showrooms, retail locations, physical presence, address, directions, or timing — including 'do you have stores?', 'do we have stores?', 'any retail store?', 'do we have a retail store?', 'where is your nearest store?', 'nearest store', 'is there a store in [city]?', 'where can I see rugs?' — ALWAYS call `search_store_locations` first (use query 'all stores' if no city given). NEVER answer store questions from your own knowledge. Use only the data returned by the tool."},
             {"role": "developer", "content": "STORE FORMAT — when showing store results, format each store exactly like this:\n**[Store Name]**\n- Address: [full address]\n- Phone: [phone]\n- Timing: [timing]\n\nShow up to 3 stores. If more exist, offer to show more. Never combine multiple stores into a single paragraph."},
             {"role": "developer", "content": "When `jaipur_rugs_product_search` returns multiple products, include all returned products (up to 3) in the final user-visible response. Do not show only one unless only one was returned."},
-            {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search` in the Price line — copy it verbatim. Do not recalculate, convert, or substitute INR when `display_price` is USD/EUR/GBP/etc. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself, do not estimate, and do not use exchange rates. If requested currency value is missing, clearly say it is unavailable."},
+            {"role": "developer", "content": "For product search results, show the exact `display_price` returned by `jaipur_rugs_product_search` in the Price line — copy it verbatim. Prefer `fabric` / MaterialDetails for composition questions. If the user asks price/size/material/weight/link for a previously shown rug, answer from Latest shown products context. For follow-up currency requests, use exact values from `mrp` only if `display_price` for that currency is not available. Do not convert between currencies yourself."},
             {"role": "developer", "content": "Only when the response contains actual rug results returned by the `jaipur_rugs_product_search` tool, append this exact line at the very end: '[🔍 Search More Rugs](https://www.jaipurrugs.com/in/search)'. Do NOT add it for cleaning, care, order, careers, custom rug, anti-slip mats/rug pads, or any non-product response."},
-            {"role": "developer", "content": "Jaipur Rugs DOES sell custom anti-slip mats (rug pads/underlays). Never tell the user Jaipur Rugs does not sell anti-slip mats. Do NOT mention pricing for anti-slip mats. For anti-slip mat questions, answer yes and share https://www.jaipurrugs.com/in/know-your-rug/about-rug-pads plus shop@jaipurrugs.com or +91 8000295928 for purchase help."},
+            {
+                "role": "developer",
+                "content": (
+                    "Jaipur Rugs DOES sell custom anti-slip mats (rug pads/underlays). Never say otherwise. "
+                    "Do NOT mention pricing. Share https://www.jaipurrugs.com/in/know-your-rug/about-rug-pads "
+                    f"plus shop@jaipurrugs.com or {general_support_phone(country_code, session_id)} for purchase help."
+                ),
+            },
             {"role": "developer", "content": "When you cannot answer from tools or KB (and no special-topic rule applies), ALWAYS call raise_agent_alert with \"Bot could not answer: \" plus a brief summary of the user's question, then respond exactly: \"Sorry, I couldn't find that. Should I connect you to a human agent for that?\" The alert must appear on the admin dashboard for support agents."},
+            {"role": "developer", "content": "If the user replies with a short affirmative (yes/sure/ok/tell me more) after you asked about an artist, collaboration, policy, or non-product topic, continue THAT topic via KB — do NOT call jaipur_rugs_product_search with a generic query."},
+            {"role": "developer", "content": "Callback flow: if the user asks to be called back, ask for their phone number (with country code) if missing. When they provide a number and/or preferred time, call raise_agent_alert with callback_requested=true and callback_phone set, then confirm."},
         ]
 
         if image_url:
@@ -1098,8 +1159,19 @@ async def chat_agent(
 
                 elif item.name == "raise_agent_alert":
                     alert = args.get("alert")
-                    logger.info(f"[AGENT-TOOL] raise_agent_alert alert={alert!r}")
-                    agent_alert_tool(alert=alert, sesson_id=session_id)
+                    callback_phone = (args.get("callback_phone") or "").strip()
+                    callback_requested = bool(args.get("callback_requested") or callback_phone)
+                    logger.info(
+                        f"[AGENT-TOOL] raise_agent_alert alert={alert!r} "
+                        f"callback_phone={callback_phone!r}"
+                    )
+                    agent_alert_tool(
+                        alert=alert,
+                        sesson_id=session_id,
+                        callback_phone=callback_phone,
+                        callback_requested=callback_requested,
+                        collection_name=collection_name,
+                    )
                     output = json.dumps({"status": "success"})
 
                 input_list.append({
@@ -1109,9 +1181,13 @@ async def chat_agent(
                 })
 
         # Step 2b: Force product search when the model skipped the tool on a clear search request
-        if not has_tool_calls and (
+        if (
+            not has_tool_calls
+            and not (_is_short_affirmative(user_message) and _last_assistant_asks_followup(chat_history))
+            and (
             _is_new_product_search_request(user_message, chat_history, previous_searches)
             or _is_price_refinement_followup(user_message, previous_searches)
+        )
         ):
             keyword = resolve_search_keyword({}, user_message)
             keyword = _merge_search_with_previous(

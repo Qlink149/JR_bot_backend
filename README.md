@@ -1,16 +1,23 @@
 # Jaipur Rugs Bot Backend
 
-FastAPI backend for the Jaipur Rugs chatbot — serves both the Web channel (WebSocket) and WhatsApp channel (Gupshup webhook) from a single Vultr server using the same AI core.
+FastAPI backend for the Jaipur Rugs chatbot — **one server** for Web (WebSocket) and WhatsApp (Gupshup), same AI core.
 
 ## Production Architecture
 
-![Architecture Diagram](docs/architecture.png)
+| Piece | Host |
+| --- | --- |
+| **Backend (web + WhatsApp + cron target)** | `https://api.vultr3.qlink.in` |
+| Frontend / admin UI | `https://qlink-jr.vercel.app` (separate repo) |
+| Product catalog | Daily sync from JR Product Master API → MongoDB `JR.products` |
 
-Both channels use the same `chat_agent.py` (GPT-4.1-mini) and the same tools. The only difference is output rendering:
-- **Web** — returns raw markdown, browser renders it
-- **WhatsApp** — markdown is converted to WhatsApp format (`*bold*`, `_italic_`) and product results are sent as interactive CTA cards (image + button) via Gupshup
+Do **not** run a second WhatsApp-only backend on Vercel. Point Gupshup webhook and the frontend at Vultr only.
 
-**Server:** `api.vultr3.qlink.in` (FastAPI · Docker · Nginx)
+```text
+WhatsApp  → Gupshup → https://api.vultr3.qlink.in/gupshup/message/hc
+Web chat  → WS/HTTP → https://api.vultr3.qlink.in
+Cron      → GET       https://api.vultr3.qlink.in/api/cron/sync-products
+Frontend  → Vercel static → same Vultr API
+```
 
 | Channel | Entry point | Session collection |
 | --- | --- | --- |
@@ -21,20 +28,8 @@ Both channels use the same `chat_agent.py` (GPT-4.1-mini) and the same tools. Th
 
 | Repo | Purpose |
 | --- | --- |
-| `JR_bot_backend` | This repo — unified backend for web + WhatsApp, deployed to Vultr via GitHub Actions |
-| `JR_frontend` | Web chatbot and admin dashboard UI |
-
-## Main Backend Responsibilities
-
-- Receive WhatsApp messages from Gupshup.
-- Send WhatsApp replies through Gupshup.
-- Run the OpenAI chatbot agent.
-- Search products and format product replies.
-- Read/write user sessions in MongoDB.
-- Read system prompts from MongoDB.
-- Search and update the Pinecone knowledge base.
-- Expose dashboard APIs for conversations, leads, alerts, products, prompts, and WhatsApp send.
-- Support human agent handoff/takeover.
+| `JR_bot_backend` | This repo — unified backend, deploy to Vultr via GitHub Actions (`jr-production`) |
+| `JR_frontend` | Web chatbot + admin dashboard (Vercel) |
 
 ## Important Routes
 
@@ -42,87 +37,55 @@ Both channels use the same `chat_agent.py` (GPT-4.1-mini) and the same tools. Th
 | --- | --- |
 | `POST /gupshup/message/hc` | Gupshup WhatsApp webhook |
 | `GET /api/conversations` | Dashboard WhatsApp conversation list |
-| `GET /api/conversations/{phone}` | Dashboard message history for one WhatsApp number |
-| `POST /api/whatsapp/send` | Send manual WhatsApp message from dashboard |
+| `GET /api/conversations/{phone}` | Dashboard message history |
+| `POST /api/whatsapp/send` | Manual WhatsApp send from dashboard |
 | `POST /api/conversations/{phone}/toggle-ai` | Toggle AI/human mode |
-| `POST /api/conversations/{phone}/takeover` | Put conversation in agent mode and notify customer |
-| `GET /api/alerts/all` | Agent alert list |
-| `DELETE /api/alerts/{id}` | Clear alert |
-| `GET /api/products` | Dashboard product list/search |
-| `GET/POST /api/prompt` | Dashboard prompt read/write |
-| `GET /api/cron/sync-products` | Product sync cron endpoint |
+| `POST /api/conversations/{phone}/takeover` | Agent takeover |
+| `GET /api/alerts/all` | Agent alerts |
+| `GET/POST /api/prompt` | Shared system prompt |
+| `POST /api/sync-products` | Manual Product Master sync |
+| `GET /api/cron/sync-products` | Scheduled sync (`Authorization: Bearer $CRON_SECRET`) |
+| `POST /api/backfill-search-tokens` | One-time search token backfill |
+| `GET /ping` | Health (Mongo + R2) |
 
-## Agent Takeover Flow
+## Product Catalog Sync
 
-When a dashboard user clicks `Take over` in the WhatsApp chat:
+Source of truth: JR **Product Master** API (not live search). Sync upserts into Mongo and builds `search_tokens` locally (`build_search_tokens`).
 
-1. Frontend calls `POST /api/conversations/{phone}/takeover`.
-2. Backend sets `is_ai` to `False` for that WhatsApp session.
-3. Backend appends a handoff message to chat history.
-4. Backend sends the customer this WhatsApp message:
+On the Vultr host, schedule daily:
 
-```text
-Thank you. Our rug specialist will assist you further over a call/message.
+```bash
+# See scripts/vultr-cron-sync-products.sh
+0 0 * * * CRON_SECRET=... /usr/local/bin/vultr-cron-sync-products.sh
 ```
-
-After this, incoming WhatsApp messages are stored but AI does not reply while `is_ai` is false.
-
-## Prompts And Knowledge
-
-The bot behavior is not only controlled by code.
-
-| Data | Location |
-| --- | --- |
-| System prompts | MongoDB `JR.internals`, document with `category: "system_prompt"` |
-| User sessions | MongoDB `JR.users` and `JR.users_whatsapp` |
-| Agent alerts | MongoDB `JR.agent_alerts` |
-| KB records | Pinecone namespace configured by `PINECONE_NAMESPACE` |
-| Product cache | MongoDB product collections populated from Jaipur Rugs API |
-
-If prompt text changes but no code changes, update MongoDB through the dashboard prompt tools or a controlled script.
 
 ## Local Development
 
-Create `.env` from `example.env` and fill required values. Never commit real secrets.
-
-Install dependencies:
-
 ```bash
+cp example.env .env   # fill secrets — never commit .env
 pip install -r requirements.txt
-```
-
-Run locally:
-
-```bash
 uvicorn qlink_chatbot.main:app --reload
-```
-
-Compile check:
-
-```bash
 python -m compileall qlink_chatbot
 ```
 
-## Deployment Notes
+## Deployment (Vultr)
 
-Push to `main` — GitHub Actions automatically SSHs into the Vultr server, rebuilds the Docker image, and restarts the container.
+Push / merge to branch **`jr-production`** → GitHub Actions SSHs to the VPS, rebuilds Docker, restarts the container.
 
-After backend changes:
+1. Merge into `jr-production` and push `origin`.
+2. Confirm `GET https://api.vultr3.qlink.in/ping`.
+3. Gupshup webhook must be `https://api.vultr3.qlink.in/gupshup/message/hc`.
 
-1. Push to `main` (or merge a branch into `main`).
-2. GitHub Actions deploys to `api.vultr3.qlink.in` automatically.
-3. Confirm with `GET https://api.vultr3.qlink.in/ping`.
+Frontend deploy is separate (Vercel). Set:
 
-After frontend changes:
-
-1. Push `JR_frontend/new-changes`.
-2. Deploy the frontend Vercel project.
-3. Confirm `https://qlink-jr.vercel.app` is ready.
+```text
+VITE_BACKEND_URL=https://api.vultr3.qlink.in
+VITE_WS_BACKEND_URL=https://api.vultr3.qlink.in
+```
 
 ## Safety Rules
 
 - Do not commit `.env`.
-- Do not paste or store production keys in README or code.
 - Do not force-push production branches.
-- Backend WhatsApp production changes should go through `whatsapp-integration-updates`.
-- Keep frontend API config pointed at the production WhatsApp backend unless a migration is planned.
+- Do not dual-push to a separate WhatsApp Vercel backend for production.
+- Keep `CRON_SECRET` set in production.

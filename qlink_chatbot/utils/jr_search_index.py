@@ -15,8 +15,19 @@ _TOKEN_SOURCE_FIELDS = (
     "SizeInFT", "SizeInCM", "SizeGroupInFT",
     "Construction", "Pattern", "Style", "StylePattern", "DecoreStyle",
     "Shape", "Room", "MultiFilter", "Quality", "Name", "Collection",
+    "Designer", "Design", "Texture",
 )
 
+# Drop composition / filler scraps from MaterialDetails etc. (e.g. "30%", "yarn", "and").
+_TOKEN_NOISE = frozenset({
+    "and", "or", "the", "of", "with", "for", "a", "an", "in", "to", "by",
+    "yarn", "yarns", "pct", "percent", "percentage",
+})
+_PERCENT_TOKEN = re.compile(r"^\d+%$")
+_FEET_SIZE_PATTERN = re.compile(
+    r"\b(\d+)\s*['′]?\s*[xX*by]\s*(\d+)\s*['′]?",
+    re.IGNORECASE,
+)
 
 _COLOR_TOKEN_FIELDS = ("GrColor", "BrColor", "DisplayFilter", "ColorMood", "BasicColor")
 _NON_COLOR_TOKEN_FIELDS = tuple(
@@ -24,18 +35,46 @@ _NON_COLOR_TOKEN_FIELDS = tuple(
 )
 
 
+def _normalize_size_text(text: str) -> str:
+    """Collapse size phrases to NxM before splitting into tokens."""
+    # "8x11'2" / "8X11'6" → "8x11" before other patterns touch the trailing inches
+    text = re.sub(
+        r"(\d+)\s*[xX*]\s*(\d+)\s*['′]\s*\d+",
+        lambda m: f"{m.group(1)}x{m.group(2)}",
+        text,
+    )
+    text = SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", text)
+    # "5' x 8'" / "5′ x 8′"
+    text = _FEET_SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", text)
+    return text
+
+
+def _is_useful_token(part: str) -> bool:
+    if not part or part in _TOKEN_NOISE:
+        return False
+    if _PERCENT_TOKEN.match(part):
+        return False
+    # Keep single-digit sizes only when part of NxM (handled separately); drop bare "2" from 8x11'2
+    if part.isdigit() and len(part) == 1:
+        return False
+    return len(part) >= 2 or part.isdigit()
+
+
 def build_search_tokens(product: dict) -> list[str]:
-    """Lowercase search tokens indexed on each product document."""
+    """Lowercase search tokens indexed on each product document.
+
+    Built from Product Master fields (API does not return tokens). Used by Mongo
+    `$all` / `$in` clauses for construction, material, size, shape, etc.
+    """
     tokens: set[str] = set()
 
     def add(value) -> None:
         if value is None or value == "":
             return
-        text = str(value).lower()
-        text = SIZE_PATTERN.sub(lambda m: f"{m.group(1)}x{m.group(2)}", text)
+        text = _normalize_size_text(str(value).lower())
         for part in re.split(r"[\s,/|&\-+()\[\]'\"]+", text):
             part = part.strip(".")
-            if len(part) >= 2 or (part.isdigit() and part):
+            if _is_useful_token(part):
                 tokens.add(part)
 
     for field in _COLOR_TOKEN_FIELDS:
@@ -64,6 +103,16 @@ def build_search_tokens(product: dict) -> list[str]:
         tokens.add(shape.lower())
         tokens.add(SHAPE_ALIASES.get(shape.lower(), shape).lower())
 
+    # SKU / barcode for exact lookups (Lorenzo-style designer already via Designer field)
+    for id_field in ("SKU", "BarCode", "Design"):
+        raw_id = str(product.get(id_field) or "").strip().lower()
+        if not raw_id:
+            continue
+        tokens.add(raw_id)
+        for part in re.split(r"[^a-z0-9]+", raw_id):
+            if _is_useful_token(part):
+                tokens.add(part)
+
     weight = product.get("Weight")
     if weight not in (None, "", 0, 0.0):
         try:
@@ -76,29 +125,43 @@ def build_search_tokens(product: dict) -> list[str]:
     return sorted(tokens)
 
 
-def backfill_search_tokens(batch_size: int = 500) -> dict:
-    """Add or rebuild search_tokens on product docs missing a usable token index."""
+def backfill_search_tokens(
+    batch_size: int = 500,
+    *,
+    rebuild_all: bool = False,
+    after_id=None,
+) -> dict:
+    """Add or rebuild search_tokens on product docs.
+
+    Default: only docs missing tokens. Set rebuild_all=True after tokenizer changes.
+    Pass after_id (ObjectId) to paginate a full rebuild.
+    """
     ensure_product_search_indexes()
     updated = 0
+    last_id = after_id
+    query: dict = {"raw": {"$exists": True}}
+    if after_id is not None:
+        query["_id"] = {"$gt": after_id}
+    if not rebuild_all:
+        query["$or"] = [
+            {"search_tokens": {"$exists": False}},
+            {"search_tokens": None},
+            {"search_tokens": {"$size": 0}},
+        ]
     cursor = products_collection.find(
-        {
-            "raw": {"$exists": True},
-            "$or": [
-                {"search_tokens": {"$exists": False}},
-                {"search_tokens": None},
-                {"search_tokens": {"$size": 0}},
-            ],
-        },
+        query,
         {"raw": 1},
-        max_time_ms=20_000,
-    ).limit(batch_size)
+        max_time_ms=60_000,
+    ).sort("_id", 1).limit(batch_size)
     for doc in cursor:
+        last_id = doc["_id"]
         raw = doc.get("raw")
         if not raw:
             continue
+        tokens = build_search_tokens(raw)
         products_collection.update_one(
             {"_id": doc["_id"]},
-            {"$set": {"search_tokens": build_search_tokens(raw)}},
+            {"$set": {"search_tokens": tokens}},
         )
         updated += 1
     remaining = products_collection.count_documents(
@@ -111,7 +174,12 @@ def backfill_search_tokens(batch_size: int = 500) -> dict:
             ],
         }
     )
-    return {"updated": updated, "remaining_without_tokens": remaining}
+    return {
+        "updated": updated,
+        "remaining_without_tokens": remaining,
+        "rebuild_all": rebuild_all,
+        "last_id": str(last_id) if last_id is not None else None,
+    }
 
 
 def ensure_product_search_indexes() -> None:

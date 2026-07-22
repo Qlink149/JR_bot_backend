@@ -646,6 +646,7 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
         for p in result:
             matched = False
             for term in terms:
+                term_l = str(term).lower().replace("-", " ")
                 if attr == "size":
                     if any(
                         re.search(size_regex(term), str(p.get(field) or ""), re.IGNORECASE)
@@ -653,15 +654,27 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
                     ):
                         matched = True
                         break
-                elif any(term in str(p.get(field) or "").lower() for field in fields):
-                    matched = True
-                    break
+                else:
+                    for field in fields:
+                        field_l = str(p.get(field) or "").lower().replace("-", " ")
+                        if term_l and term_l in field_l:
+                            matched = True
+                            break
+                    if matched:
+                        break
             if matched:
                 filtered.append(p)
         if filtered:
+            logger.info(
+                f"[SEARCH] {attr} filter: {len(result)} → {len(filtered)} (terms={terms})"
+            )
             result = filtered
         else:
-            return []
+            # Soften: keep prior pool rather than hard-empty when one attribute is too strict
+            logger.info(
+                f"[SEARCH] {attr} filter matched 0 — keeping {len(result)} prior results "
+                f"(terms={terms})"
+            )
     return result
 
 

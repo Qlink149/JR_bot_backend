@@ -77,13 +77,13 @@ async def jaipur_rugs_product_search(
     try:
         keyword = (keyword or "").strip()
         llm_extraction_debug = None
-        detected_currency = (
-            normalize_currency_code(requested_currency)
-            if requested_currency
-            else resolve_currency_from_country_code(country_code)
-            or resolve_currency_from_ip(client_ip)
-            or "INR"
-        )
+        if requested_currency:
+            detected_currency = normalize_currency_code(requested_currency)
+        else:
+            detected_currency = resolve_currency_from_country_code(country_code)
+            if not detected_currency:
+                detected_currency = await resolve_currency_from_ip(client_ip)
+            detected_currency = detected_currency or "INR"
         keyword, llm_extraction_debug = await resolve_keyword_with_llm_extraction(
             keyword,
             user_message=user_message,

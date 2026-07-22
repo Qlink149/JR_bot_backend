@@ -11,23 +11,22 @@ from qlink_chatbot.database.mongo_utils import (
     get_session_by_id,
     save_message,
     save_user_name,
+    try_mark_whatsapp_message_processed,
     whatsapp_status_events_collection,
 )
 from qlink_chatbot.utils.jaipur_rugs_api import CALLING_CODE_TO_CURRENCY
 from qlink_chatbot.utils.logger_config import logger
+from qlink_chatbot.utils.support_contacts import (
+    SHOP_EMAIL,
+    country_from_phone,
+    general_support_phone,
+)
 from qlink_chatbot.whatsapp_functions.dispatch import dispatch_whatsapp_responses
 from qlink_chatbot.whatsapp_functions.send_typing_indicator import typing_indicator_loop
 
 whatsapp_router = APIRouter()
 WHATSAPP_COLLECTION_NAME = "users_whatsapp"
 
-_IMAGE_NOT_SUPPORTED_RESPONSE = (
-    "I'm sorry, I'm not able to identify or process images at this time.\n\n"
-    "For assistance, please reach out to us:\n"
-    "- Email: shop@jaipurrugs.com\n"
-    "- India: +91 8000295928 (WhatsApp available)\n"
-    "- International: +91 7412 060 022 (WhatsApp available)"
-)
 _MEDIA_SENTINEL = "__MEDIA_MESSAGE__"
 
 _CALLING_CODE_SORTED = sorted(CALLING_CODE_TO_CURRENCY.keys(), key=len, reverse=True)
@@ -165,6 +164,7 @@ def _extract_gupshup_message(request_data: dict) -> dict:
         content = payload
 
     text = ""
+    image_url = ""
     if message_type in {"text", "txt"}:
         text = content.get("text", "")
     elif message_type in {"button_reply", "list_reply", "button"}:
@@ -175,6 +175,16 @@ def _extract_gupshup_message(request_data: dict) -> dict:
         )
     elif message_type in {"image", "video", "audio", "document", "sticker"}:
         text = _MEDIA_SENTINEL
+        if message_type == "image":
+            image_url = (
+                content.get("url")
+                or content.get("link")
+                or (content.get("image") or {}).get("url")
+                or ""
+            )
+            caption = (content.get("caption") or "").strip()
+            if caption:
+                text = caption
 
     phone = payload.get("source", "") or payload.get("sender", {}).get("phone", "")
     if not phone:
@@ -184,6 +194,8 @@ def _extract_gupshup_message(request_data: dict) -> dict:
         "text": (text or "").strip(),
         "name": (payload.get("sender") or {}).get("name", ""),
         "message_id": payload.get("id", "") or content.get("id", ""),
+        "image_url": (image_url or "").strip(),
+        "message_type": message_type,
     }
 
 
@@ -250,62 +262,97 @@ async def _process_message(request_data: dict) -> None:
             whatsapp_username = gupshup_message.get("name", "")
             user_text = gupshup_message.get("text", "")
             message_id = gupshup_message.get("message_id", "")
+            image_url = gupshup_message.get("image_url", "") or ""
+            message_type = gupshup_message.get("message_type", "")
         elif incoming_messages:
             incoming_message = incoming_messages[0]
             phone_number = incoming_message.get("from", "")
             whatsapp_username = _extract_username(whatsapp_event)
             user_text = _extract_user_message_text(incoming_message)
             message_id = incoming_message.get("id", "")
+            image_url = ""
+            message_type = incoming_message.get("type", "")
+            if message_type == "image":
+                image_block = incoming_message.get("image") or {}
+                image_url = (image_block.get("url") or image_block.get("link") or "").strip()
+                if user_text == _MEDIA_SENTINEL:
+                    user_text = (image_block.get("caption") or "").strip() or (
+                        "Please review this custom rug design image."
+                    )
         else:
             logger.info("No incoming messages in webhook payload")
             return
 
-        if not phone_number or not user_text:
+        if not phone_number or (not user_text and not image_url):
             logger.info("Skipping — missing phone or text",
                         extra={"phone_number": phone_number})
             return
 
-        logger.info(f"[WA-IN] phone={phone_number} name={whatsapp_username!r} msg={user_text!r}")
+        if not try_mark_whatsapp_message_processed(
+            message_id=message_id,
+            phone=phone_number,
+            message_text=user_text,
+        ):
+            logger.info(f"[WA] Duplicate message skipped id={message_id}")
+            return
 
-        if user_text == _MEDIA_SENTINEL:
-            logger.info(f"[WA] Media message from {phone_number} — sending not-supported reply")
+        logger.info(f"[WA-IN] phone={phone_number} name={whatsapp_username!r} msg={user_text!r} image={'yes' if image_url else 'no'}")
+
+        # Non-image media still unsupported
+        if user_text == _MEDIA_SENTINEL and not image_url:
+            support = general_support_phone("", phone_number)
             dispatch_whatsapp_responses(
                 phone_number=phone_number,
-                bot_responses=[{"type": "text", "text": _IMAGE_NOT_SUPPORTED_RESPONSE}],
+                bot_responses=[{
+                    "type": "text",
+                    "text": (
+                        "I can review custom rug design photos when you send an image. "
+                        f"For other file types, email {SHOP_EMAIL} or WhatsApp {support}."
+                    ),
+                }],
             )
             return
+
+        if image_url and (not user_text or user_text == _MEDIA_SENTINEL):
+            user_text = "Please review this custom rug design image."
 
         session_id = phone_number.lower()
         session = get_session_by_id(session_id=session_id,
                                     collection_name=WHATSAPP_COLLECTION_NAME)
+        country_code = country_from_phone(phone_number)
 
         if not session:
             logger.info(f"[WA] New session created for {phone_number}")
-            create_session(session_id=session_id, country_code="",
+            create_session(session_id=session_id, country_code=country_code,
                            name=whatsapp_username, is_ai=True,
                            collection_name=WHATSAPP_COLLECTION_NAME)
-            session = {"chat_history": [], "country_code": ""}
+            session = {"chat_history": [], "country_code": country_code}
         else:
             history_len = len(session.get("chat_history") or [])
             logger.info(f"[WA] Existing session for {phone_number} — history_msgs={history_len} is_ai={session.get('is_ai', True)}")
             if whatsapp_username and whatsapp_username != session.get("user_name", ""):
                 save_user_name(session_id=session_id, name=whatsapp_username,
                                collection_name=WHATSAPP_COLLECTION_NAME)
+            country_code = session.get("country_code") or country_code
 
         save_message(session_id=session_id, role="user", content=user_text,
                      collection_name=WHATSAPP_COLLECTION_NAME)
+        # Re-fetch so chat_history includes the message we just saved
+        session = get_session_by_id(session_id=session_id,
+                                    collection_name=WHATSAPP_COLLECTION_NAME) or session
 
         if not session.get("is_ai", True):
             logger.info(f"[WA] Human agent active for {phone_number} — skipping AI")
             return
 
         currency = _currency_from_phone(phone_number)
-        logger.info(f"[WA] Detected currency={currency} for {phone_number}")
+        logger.info(f"[WA] Detected currency={currency} country={country_code} for {phone_number}")
 
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(typing_indicator_loop(message_id, stop_typing))
 
         ai_text = ""
+        responses: list[dict] = []
         try:
             searches_before = get_previous_search(session_id,
                                                   collection_name=WHATSAPP_COLLECTION_NAME)
@@ -316,14 +363,13 @@ async def _process_message(request_data: dict) -> None:
                 chat_history=session.get("chat_history", []),
                 user_message=user_text,
                 session_id=session_id,
-                country_code="",
+                country_code=country_code,
                 client_ip="",
                 collection_name=WHATSAPP_COLLECTION_NAME,
                 detected_currency=currency,
+                image_url=image_url,
             )
             logger.info(f"[WA-AI] phone={phone_number} ai_response={ai_text!r}")
-
-            responses: list[dict] = []
 
             searches_after = get_previous_search(session_id,
                                                  collection_name=WHATSAPP_COLLECTION_NAME)

@@ -16,10 +16,18 @@ PARTNER_BASE_URL = "https://partner.gupshup.io"
 DEFAULT_MODES = "MESSAGE,SENT,DELIVERED,READ,DELETED,FAILED,OTHERS,ENQUEUED"
 
 
-def require_env(name: str) -> str:
-    value = (os.environ.get(name) or "").strip()
+def env_first(*names: str) -> str:
+    for name in names:
+        value = (os.environ.get(name) or "").strip().strip('"').strip("'")
+        if value:
+            return value
+    return ""
+
+
+def require_env(*names: str) -> str:
+    value = env_first(*names)
     if not value:
-        raise SystemExit(f"Missing required environment variable: {name}")
+        raise SystemExit(f"Missing required environment variable: {' or '.join(names)}")
     return value
 
 
@@ -72,14 +80,13 @@ def get_partner_token() -> str:
 
 
 def get_app_token(app_id: str) -> str:
-    explicit_app_token = (os.environ.get("GUPSHUP_PARTNER_APP_TOKEN") or "").strip()
+    explicit_app_token = env_first(
+        "GUPSHUP_PARTNER_APP_TOKEN",
+        "QLINK_GUPSHUP_PARTNER_APP_TOKEN",
+        "GUPSHUP_TOKEN",
+    )
     if explicit_app_token:
         return explicit_app_token
-
-    # Some projects already store the Gupshup app token in GUPSHUP_TOKEN.
-    legacy_app_token = (os.environ.get("GUPSHUP_TOKEN") or "").strip()
-    if legacy_app_token:
-        return legacy_app_token
 
     partner_token = get_partner_token()
     response = requests.get(
@@ -165,9 +172,33 @@ def upsert_subscription(app_id: str, app_token: str, webhook_url: str) -> dict[s
 
 
 def main() -> None:
-    app_id = require_env("GUPSHUP_APP_ID")
-    webhook_url = require_env("WEBHOOK_URL")
+    app_id = require_env("GUPSHUP_APP_ID", "QLINK_GUPSHUP_APP_ID")
+    webhook_url = require_env(
+        "WEBHOOK_URL",
+        "GUPSHUP_WEBHOOK_URL",
+    )
     app_token = get_app_token(app_id)
+
+    # Always show current subscriptions first for cutover verification.
+    before = get_existing_subscriptions(app_id, app_token)
+    print(
+        json.dumps(
+            {
+                "existingSubscriptions": [
+                    {
+                        "id": s.get("id"),
+                        "url": s.get("url"),
+                        "tag": s.get("tag"),
+                        "version": s.get("version"),
+                        "active": s.get("active"),
+                    }
+                    for s in before
+                ]
+            },
+            indent=2,
+        )
+    )
+
     result = upsert_subscription(app_id, app_token, webhook_url)
     subscription = result["subscription"]
     print(

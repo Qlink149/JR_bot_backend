@@ -403,8 +403,15 @@ def update_system_prompt(
         logger.error("Error updating system prompt", extra={"error": e})
         raise e
     
-def raise_alert(session_id: str, alert_body: str):
-    """Raise alert when ai esclate query to the agent."""
+def raise_alert(
+    session_id: str,
+    alert_body: str,
+    *,
+    channel: str = "",
+    callback_phone: str = "",
+    callback_requested: bool = False,
+):
+    """Raise alert when AI escalates a query to the agent."""
     try:
         now = int(time.time())
         waiting_count = handoff_requests_collection.count_documents(
@@ -413,6 +420,33 @@ def raise_alert(session_id: str, alert_body: str):
         queue_position = waiting_count + 1
         eta_minutes = max(5, queue_position * 5)
 
+        sid = (session_id or "").strip()
+        if channel in {"web", "whatsapp"}:
+            inferred_channel = channel
+        elif "-" in sid and len(sid) >= 32:
+            inferred_channel = "web"
+        elif sid.isdigit() or (
+            sid.startswith("+") and sid[1:].isdigit()
+        ):
+            inferred_channel = "whatsapp"
+        else:
+            digits = "".join(ch for ch in sid if ch.isdigit())
+            inferred_channel = "whatsapp" if len(digits) >= 10 and not any(
+                c.isalpha() for c in sid
+            ) else "web"
+
+        wants_callback = bool(callback_requested or callback_phone)
+        handoff_set = {
+            "alert": alert_body,
+            "updated_at": now,
+            "queue_position": queue_position,
+            "eta_minutes": eta_minutes,
+            "channel": inferred_channel,
+            "callback_requested": wants_callback,
+        }
+        if callback_phone:
+            handoff_set["callback_phone"] = callback_phone
+
         handoff_requests_collection.update_one(
             {"session_id": session_id, "status": "waiting"},
             {
@@ -420,39 +454,37 @@ def raise_alert(session_id: str, alert_body: str):
                     "session_id": session_id,
                     "created_at": now,
                     "status": "waiting",
-                    "callback_requested": False,
                 },
-                "$set": {
-                    "alert": alert_body,
-                    "updated_at": now,
-                    "queue_position": queue_position,
-                    "eta_minutes": eta_minutes,
-                },
+                "$set": handoff_set,
             },
             upsert=True,
         )
 
-        result = agent_alerts.insert_one(
-            {
-                "session_id": session_id,
-                "alert": alert_body,
-                "created_at": now,
-                "queue_position": queue_position,
-                "eta_minutes": eta_minutes,
-                "status": "waiting",
-            }
-        )
+        alert_doc = {
+            "session_id": session_id,
+            "alert": alert_body,
+            "created_at": now,
+            "queue_position": queue_position,
+            "eta_minutes": eta_minutes,
+            "status": "waiting",
+            "channel": inferred_channel,
+            "callback_requested": wants_callback,
+        }
+        if callback_phone:
+            alert_doc["callback_phone"] = callback_phone
+
+        result = agent_alerts.insert_one(alert_doc)
         return {
             "status": "success",
             "queue_position": queue_position,
             "eta_minutes": eta_minutes,
+            "id": str(result.inserted_id),
+            "channel": inferred_channel,
         }
     except Exception as e:
         logger.error(
             "Error raising agent alert.",
-            extra={
-                "error": e
-            }
+            extra={"error": e},
         )
         raise e
 

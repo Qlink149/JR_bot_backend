@@ -15,10 +15,5 @@
       "dest": "/api/index"
     }
   ],
-  "crons": [
-    {
-      "path": "/api/cron/sync-products",
-      "schedule": "0 0 * * *"
-    }
-  ]
+  "crons": []
 }

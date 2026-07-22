@@ -116,6 +116,7 @@ jobs:
                 -e JR_API_CLIENT_ID="${{ secrets.JR_API_CLIENT_ID }}" \
                 -e JR_API_CLIENT_SECRET="${{ secrets.JR_API_CLIENT_SECRET }}" \
                 -e CORS_ORIGINS="${{ secrets.CORS_ORIGINS }}" \
+                -e CRON_SECRET="${{ secrets.CRON_SECRET }}" \
                 "$IMAGE_NAME"
             }
 
@@ -156,6 +157,16 @@ jobs:
 
             echo "R2 status from /ping:"
             curl -sf "http://127.0.0.1:8000/ping" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('r2', {}), indent=2))" || true
+
+            if [ -z "${{ secrets.CRON_SECRET }}" ]; then
+              echo "WARNING: CRON_SECRET secret is empty — daily product sync cron will not work until it is set."
+            else
+              APP_DIR="${{ env.APP_DIR }}"
+              CRON_SECRET="${{ secrets.CRON_SECRET }}" \
+                APP_DIR="$APP_DIR" \
+                bash "$APP_DIR/scripts/install-vultr-cron.sh"
+              echo "Daily product-sync cron installed (00:00 server time)."
+            fi
 
       - name: Cleanup
         uses: appleboy/ssh-action@master
