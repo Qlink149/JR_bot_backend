@@ -124,6 +124,9 @@ coverage/
 *.iml
 *.log
 
+# Large Product Master dumps (keep sample + inventory in git)
+docs/product_master/product_master_full.json
+
 # Python Virtual Environments
 venv/
 ENV/

@@ -16,6 +16,8 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from qlink_chatbot.utils.jr_search_aliases import (
+    CATALOG_TAG_ALIASES,
+    CATALOG_TAG_KEYS,
     COLOR_ALIASES,
     CONSTRUCTION_KEYWORDS,
     MATERIAL_KEYWORDS,
@@ -23,6 +25,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     ROOM_KEYWORDS,
     SHAPE_ALIASES,
     SIZE_CATEGORIES,
+    normalise_catalog_tag,
     normalise_size_category,
     SIZE_PATTERN,
     color_search_terms,
@@ -92,6 +95,11 @@ SEARCH_EXTRACTION_SCHEMA = {
                 "constructions": {"type": "array", "items": {"type": "string"}},
                 "patterns": {"type": "array", "items": {"type": "string"}},
                 "rooms": {"type": "array", "items": {"type": "string"}},
+                "catalog_tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Merchandising facets: new, bestseller, antique, swatch, outdoor.",
+                },
                 "multicolor": {"type": "boolean"},
                 "weight_max_kg": {"type": ["number", "null"]},
                 "has_price_filter": {
@@ -132,7 +140,7 @@ SEARCH_EXTRACTION_SCHEMA = {
             },
             "required": [
                 "colors", "shapes", "sizes_ft", "sizes_cm", "size_categories", "materials",
-                "constructions", "patterns", "rooms", "multicolor",
+                "constructions", "patterns", "rooms", "catalog_tags", "multicolor",
                 "weight_max_kg", "has_price_filter", "price_currency", "price_type",
                 "price_amount", "price_min", "price_max", "price_raw_phrase",
                 "sku", "collection", "refinement",
@@ -167,7 +175,7 @@ def summarise_normalise_result(
         attribute_filters.get(key)
         for key in (
             "color", "color_exact", "shape", "size", "size_cm", "size_category",
-            "material", "construction", "pattern", "room",
+            "material", "construction", "pattern", "room", "catalog_tag",
             "weight_max", "multicolor",
         )
     )
@@ -298,6 +306,10 @@ def _match_construction(value: str) -> str | None:
 
 def _match_room(value: str) -> str | None:
     return _match_keyword(value, ROOM_KEYWORDS)
+
+
+def _match_catalog_tag(value: str) -> str | None:
+    return normalise_catalog_tag(value)
 
 
 def _validate_size_ft(value: str) -> str | None:
@@ -459,6 +471,7 @@ def build_search_payload_from_attrs(attrs: dict) -> dict[str, Any]:
         "size_category": set(),
         "material": set(), "construction": set(), "pattern": set(),
         "room": set(), "weight_max": set(), "multicolor": set(),
+        "catalog_tag": set(),
     }
 
     for color in attrs.get("colors") or []:
@@ -484,6 +497,8 @@ def build_search_payload_from_attrs(attrs: dict) -> dict[str, Any]:
         attribute_filters["pattern"].add(pattern.lower())
     for room in attrs.get("rooms") or []:
         attribute_filters["room"].add(room)
+    for tag in attrs.get("catalog_tags") or []:
+        attribute_filters["catalog_tag"].add(tag)
     if attrs.get("multicolor"):
         attribute_filters["multicolor"].add("multicolor")
     weight = attrs.get("weight_max_kg")
@@ -521,6 +536,7 @@ def validate_extracted_attributes(
         "constructions": [],
         "patterns": [],
         "rooms": [],
+        "catalog_tags": [],
         "multicolor": bool(raw.get("multicolor")),
         "weight_max_kg": None,
         "price": None,
@@ -565,11 +581,24 @@ def validate_extracted_attributes(
             dropped.append(f"construction:{c}")
 
     for r in raw.get("rooms") or []:
+        # Outdoor is a ProductTag facet, not a Room value.
+        tag = _match_catalog_tag(r)
+        if tag == "outdoor":
+            if tag not in out["catalog_tags"]:
+                out["catalog_tags"].append(tag)
+            continue
         matched = _match_room(r)
         if matched and matched not in out["rooms"]:
             out["rooms"].append(matched)
         elif r:
             dropped.append(f"room:{r}")
+
+    for t in raw.get("catalog_tags") or []:
+        matched = _match_catalog_tag(t)
+        if matched and matched not in out["catalog_tags"]:
+            out["catalog_tags"].append(matched)
+        elif t:
+            dropped.append(f"catalog_tag:{t}")
 
     for s in raw.get("sizes_ft") or []:
         lower = (s or "").strip().lower()
@@ -654,6 +683,9 @@ def attributes_to_catalog_keyword(attrs: dict) -> str:
         segments.append(pattern)
     for room in attrs.get("rooms") or []:
         segments.append(room)
+    for tag in attrs.get("catalog_tags") or []:
+        segments.append(tag)
+    # size_categories stay in attribute_filters only (sqft / SizeGroup post-filter).
     if attrs.get("multicolor"):
         segments.append("multicolor")
     weight = attrs.get("weight_max_kg")
@@ -741,13 +773,17 @@ def _catalog_hints() -> str:
     shapes = ", ".join(sorted(SHAPE_ALIASES.keys()))
     patterns = ", ".join(sorted(PATTERN_ALIASES.keys()))
     materials = ", ".join(MATERIAL_KEYWORDS)
+    tags = ", ".join(sorted(CATALOG_TAG_KEYS))
+    tag_aliases = ", ".join(sorted(CATALOG_TAG_ALIASES.keys()))
     return (
         f"Allowed color keys (use EXACTLY these strings in colors[]): {colors}\n"
         f"Allowed shape keys: {shapes}\n"
         f"Allowed pattern/style keys: {patterns}\n"
         f"Allowed materials: {materials}\n"
         f"Allowed constructions: {', '.join(CONSTRUCTION_KEYWORDS)}\n"
-        f"Allowed rooms: {', '.join(ROOM_KEYWORDS)}"
+        f"Allowed rooms: {', '.join(ROOM_KEYWORDS)}\n"
+        f"Allowed catalog_tags (use EXACTLY these): {tags}\n"
+        f"catalog_tags phrase aliases: {tag_aliases}"
     )
 
 
@@ -776,8 +812,16 @@ NEVER-DROP RULES
 
 SIZE RULES
 - Foot dimensions → sizes_ft (normalize separators * × by / - to x). Never put 8x10 in size_categories.
+- "6 dia round" / "8' round" → sizes_ft=["6 dia round"] or ["8 round"] AND shapes=["round"].
 - size_categories only for bucket words: small, medium, large, oversize (map oversized→oversize).
 - CM dimensions (e.g. 240x300 cm, 240×300cm) → sizes_cm.
+
+CATALOG TAG RULES (website mega-menu)
+- new arrival / new arrivals → catalog_tags=["new"]
+- bestsellers / best seller → catalog_tags=["bestseller"]
+- antique rugs → catalog_tags=["antique"]
+- rug swatch / swatches → catalog_tags=["swatch"]
+- outdoor rugs → catalog_tags=["outdoor"] (NOT rooms — Outdoor is a product tag)
 
 PRICE RULES
 - Any budget/price/cost/above/under/over/below/between/k/lakh/lac/cr → has_price_filter=true.
@@ -786,7 +830,7 @@ PRICE RULES
 - price_raw_phrase = exact price words from the user. Never invent amounts.
 
 CATALOG RULES
-- colors/shapes/patterns/materials/constructions/rooms MUST use keys from the allowed lists below.
+- colors/shapes/patterns/materials/constructions/rooms/catalog_tags MUST use keys from the allowed lists below.
 - Empty array only when that attribute was NOT mentioned. Do not guess.
 - refinement: refine_previous | show_more | new.
 
@@ -814,6 +858,21 @@ EXAMPLES (attribute intent only):
 
 "hand tufted blue round under 2 lakh"
 → colors=["blue"], shapes=["round"], constructions=["hand tufted"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=200000
+
+"show me new arrival rugs"
+→ catalog_tags=["new"]
+
+"bestsellers"
+→ catalog_tags=["bestseller"]
+
+"outdoor rugs"
+→ catalog_tags=["outdoor"]
+
+"antique rugs"
+→ catalog_tags=["antique"]
+
+"rug swatch"
+→ catalog_tags=["swatch"]
 
 {_catalog_hints()}"""
 
@@ -848,6 +907,7 @@ def backfill_attrs_from_regex(
         "room": set(),
         "weight_max": set(),
         "multicolor": set(),
+        "catalog_tag": set(),
     }
     for source in sources:
         _pf, _clean, terms, parsed = normalise_keyword(source)
@@ -858,7 +918,7 @@ def backfill_attrs_from_regex(
     out = dict(attrs)
     for key in (
         "colors", "shapes", "sizes_ft", "sizes_cm", "size_categories",
-        "materials", "constructions", "patterns", "rooms",
+        "materials", "constructions", "patterns", "rooms", "catalog_tags",
     ):
         out[key] = list(out.get(key) or [])
 
@@ -913,6 +973,11 @@ def backfill_attrs_from_regex(
         if room not in out["rooms"]:
             out["rooms"].append(room)
             notes.append(f"backfill:room:{room}")
+
+    for tag in sorted(filters.get("catalog_tag") or set()):
+        if tag not in out["catalog_tags"]:
+            out["catalog_tags"].append(tag)
+            notes.append(f"backfill:catalog_tag:{tag}")
 
     if (filters.get("multicolor") or set()) and not out.get("multicolor"):
         out["multicolor"] = True

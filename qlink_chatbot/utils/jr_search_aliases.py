@@ -2,6 +2,10 @@ import re
 
 SIZE_PATTERN = re.compile(r"\b(\d+)\s*(?:x|by|\*|X)\s*(\d+)\b", re.IGNORECASE)
 ROUND_SIZE_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*['′]?\s*round\b", re.IGNORECASE)
+DIA_ROUND_PATTERN = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s*dia(?:meter)?\s*round\b",
+    re.IGNORECASE,
+)
 WEIGHT_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*kg\b", re.IGNORECASE)
 MULTICOLOR_KEYS = frozenset({"multicolor", "multi", "multicolour", "colorful", "multi color"})
 SIZE_CATEGORIES = frozenset({"small", "medium", "large", "oversize"})
@@ -9,6 +13,7 @@ SIZE_CATEGORY_ALIASES: dict[str, str] = {
     "oversized": "oversize",
     "over-sized": "oversize",
     "over size": "oversize",
+    "oversize rugs": "oversize",
     "extra-large": "large",
     "extra large": "large",
     "xlarge": "large",
@@ -17,6 +22,31 @@ SIZE_CATEGORY_ALIASES: dict[str, str] = {
     "mid size": "medium",
     "midsize": "medium",
     "mid": "medium",
+}
+
+# Website mega-menu merchandising facets (not room/color).
+CATALOG_TAG_KEYS = frozenset({"new", "bestseller", "antique", "swatch", "outdoor"})
+CATALOG_TAG_ALIASES: dict[str, str] = {
+    "new arrival": "new",
+    "new arrivals": "new",
+    "newly arrived": "new",
+    "new arrivals rugs": "new",
+    "bestsellers": "bestseller",
+    "best sellers": "bestseller",
+    "best seller": "bestseller",
+    "bestseller": "bestseller",
+    "best-selling": "bestseller",
+    "best selling": "bestseller",
+    "antique rugs": "antique",
+    "antique rug": "antique",
+    "antique": "antique",
+    "rug swatch": "swatch",
+    "rug swatches": "swatch",
+    "swatches": "swatch",
+    "swatch": "swatch",
+    "outdoor rugs": "outdoor",
+    "outdoor rug": "outdoor",
+    "outdoor": "outdoor",
 }
 
 
@@ -28,6 +58,16 @@ def normalise_size_category(term: str) -> str | None:
     if key in SIZE_CATEGORIES:
         return key
     return SIZE_CATEGORY_ALIASES.get(key)
+
+
+def normalise_catalog_tag(term: str) -> str | None:
+    """Map user/LLM merchandising phrases to catalog_tag keys."""
+    key = (term or "").strip().lower()
+    if not key:
+        return None
+    if key in CATALOG_TAG_KEYS:
+        return key
+    return CATALOG_TAG_ALIASES.get(key)
 NOISE_WORDS = {
     "show", "me", "find", "search", "looking", "look", "need", "want",
     "please", "rug", "rugs", "carpet", "carpets", "in", "the", "a", "an",
@@ -82,6 +122,8 @@ COLOR_ALIASES: dict[str, str] = {
     "lavender": "Lavender||Purple||Lilac||Wisteria",
     "violet": "Violet||Purple||Lavender",
     "wisteria": "Wisteria||Lavender||Purple",
+    "cyan": "Cyan||Teal||Turquoise||Blue",
+    "turquoise": "Turquoise||Teal||Cyan||Blue",
 }
 
 SHAPE_ALIASES: dict[str, str] = {
@@ -117,15 +159,25 @@ PATTERN_ALIASES: dict[str, str] = {
 }
 
 MATERIAL_KEYWORDS = (
-    "wool and bamboo silk", "wool and viscose", "bamboo silk", "pure silk",
-    "wool", "silk", "viscose", "cotton", "bamboo", "jute", "leather", "nylon",
+    "wool and bamboo silk", "wool & bamboo silk",
+    "wool and viscose", "wool & viscose",
+    "wool and silk", "wool & silk",
+    "afghan wool and bamboo silk", "afghan wool and silk", "afghan wool and jute",
+    "afghan wool",
+    "bamboo silk and zari", "bamboo silk & zari",
+    "jute and hemp", "jute & hemp",
+    "bamboo silk", "pure silk",
+    "wool", "silk", "viscose", "cotton", "bamboo", "jute", "hemp",
+    "leather", "nylon", "polyester", "acrylic", "tencil", "pet",
 )
 CONSTRUCTION_KEYWORDS = (
-    "hand knotted", "hand tufted", "hand loom", "hand woven", "flat weave",
+    "hand knotted", "hand tufted", "hand loom", "hand woven",
+    "flat weaves", "flat weave", "shag",
     "machine made", "handmade",
 )
+# Outdoor is a ProductTag catalog facet, not a Room value.
 ROOM_KEYWORDS = (
-    "living room", "dining room", "bedroom", "outdoor", "bathroom",
+    "living room", "dining room", "bedroom", "bathroom",
     "kitchen", "hallway", "office", "kids room", "entryway",
 )
 
@@ -146,11 +198,12 @@ MONGO_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
         "raw.DisplayFilter", "raw.ColorMood", "raw.BasicColor",
     ),
     "pattern": ("raw.Pattern", "raw.Style", "raw.StylePattern", "raw.DecoreStyle"),
-    "size": ("raw.SizeInFT", "raw.SizeInCM"),
+    "size": ("raw.SizeInFT", "raw.SizeInCM", "raw.SizeGroupInFT", "raw.SizeGroupInCM"),
     "material": ("raw.Material", "raw.MaterialDetails", "raw.MaterialFamilies"),
     "construction": ("raw.Construction",),
     "shape": ("raw.Shape",),
     "room": ("raw.Room", "raw.MultiFilter"),
+    "catalog_tag": ("raw.ProductTag", "raw.Quality", "raw.SizeGroupInFT"),
     "general": tuple(f"raw.{f}" for f in API_SEARCH_FIELDS),
 }
 

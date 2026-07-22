@@ -12,10 +12,10 @@ _indexes_ensured = False
 _TOKEN_SOURCE_FIELDS = (
     "GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood", "BasicColor",
     "Material", "MaterialDetails", "MaterialFamilies",
-    "SizeInFT", "SizeInCM", "SizeGroupInFT",
+    "SizeInFT", "SizeInCM", "SizeGroupInFT", "SizeGroupInCM",
     "Construction", "Pattern", "Style", "StylePattern", "DecoreStyle",
     "Shape", "Room", "MultiFilter", "Quality", "Name", "Collection",
-    "Designer", "Design", "Texture",
+    "Designer", "Design", "Texture", "ProductTag",
 )
 
 # Drop composition / filler scraps from MaterialDetails etc. (e.g. "30%", "yarn", "and").
@@ -102,6 +102,35 @@ def build_search_tokens(product: dict) -> list[str]:
     if shape:
         tokens.add(shape.lower())
         tokens.add(SHAPE_ALIASES.get(shape.lower(), shape).lower())
+
+    # Merchandising facets from ProductTag / BestSellerStatus / Quality.
+    product_tag = str(product.get("ProductTag") or "").strip().lower()
+    if product_tag:
+        tokens.add(product_tag)
+        if product_tag == "new":
+            tokens.update({"new", "newarrival", "arrival"})
+        elif "bestseller" in product_tag or "best seller" in product_tag:
+            tokens.add("bestseller")
+        elif product_tag == "outdoor":
+            tokens.add("outdoor")
+    if product.get("BestSellerStatus") is True:
+        tokens.add("bestseller")
+    quality = str(product.get("Quality") or "").strip().lower()
+    if "antique" in quality:
+        tokens.add("antique")
+    size_group = str(product.get("SizeGroupInFT") or "").strip().lower()
+    if "swatch" in size_group:
+        tokens.update({"swatch", "swatches"})
+    if "oversize" in size_group:
+        tokens.add("oversize")
+    # Normalize SizeGroup chips to NxM / Ndiaround tokens for recall.
+    dia_match = re.search(r"(\d+(?:\.\d+)?)\s*dia(?:meter)?\s*round", size_group)
+    if dia_match:
+        tokens.add(f"{dia_match.group(1)}diaround")
+        tokens.add(f"{dia_match.group(1)} round")
+    size_match = SIZE_PATTERN.search(size_group.replace(" ", ""))
+    if size_match:
+        tokens.add(f"{size_match.group(1)}x{size_match.group(2)}")
 
     # SKU / barcode for exact lookups (Lorenzo-style designer already via Designer field)
     for id_field in ("SKU", "BarCode", "Design"):

@@ -3,7 +3,9 @@ import re
 from qlink_chatbot.database.mongo_utils import db
 from qlink_chatbot.utils.jr_search_aliases import (
     API_SEARCH_FIELDS,
+    CATALOG_TAG_KEYS,
     CONSTRUCTION_KEYWORDS,
+    DIA_ROUND_PATTERN,
     KNOWN_COLOR_VALUES,
     KNOWN_PATTERN_VALUES,
     KNOWN_SHAPE_VALUES,
@@ -17,6 +19,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     WEIGHT_PATTERN,
     color_search_terms,
     color_match_is_strict,
+    normalise_catalog_tag,
     COLOR_FAMILY_FIELDS,
     COLOR_MATCH_FIELDS,
 )
@@ -35,6 +38,8 @@ from qlink_chatbot.utils.jr_search_sizes import (
     parse_requested_cm_size,
     product_matches_cm_size,
     product_matches_size_category,
+    product_matches_size_term,
+    size_field_regex,
 )
 from qlink_chatbot.utils.logger_config import logger
 
@@ -45,10 +50,12 @@ CANDIDATE_LIMIT = 800
 COLOR_SAMPLE_SIZE = 120
 
 LISTING_RAW_FIELDS: tuple[str, ...] = (
-    "SKU", "BarCode", "Name", "Collection", "ProductURL", "SizeInFT", "SizeInCM", "Shape",
+    "SKU", "BarCode", "Name", "Collection", "ProductURL", "SizeInFT", "SizeInCM",
+    "SizeGroupInFT", "SizeGroupInCM", "Shape",
     "GrColor", "BrColor", "ColorFamily", "DisplayFilter", "ColorMood", "Pattern", "Style",
     "DecoreStyle", "StylePattern", "MultiFilter",
     "Construction", "Material", "MaterialDetails", "MaterialFamilies", "Quality", "Room",
+    "ProductTag", "BestSellerStatus",
     "Weight", "HeadShot", "Corner", "CloseUp", "FoldShot", "Floorshot",
     "INR_MRP", "USD_MRP", "EUR_MRP", "GBP_MRP", "AUD_MRP", "CHF_MRP", "SGD_MRP", "AED_MRP",
 )
@@ -74,6 +81,7 @@ COMPACT_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
     "size": ("search.size.exact",),
     "pattern": ("search.style",),
     "room": ("search.room",),
+    "catalog_tag": (),
 }
 
 PATTERN_RAW_FIELDS = (
@@ -87,15 +95,7 @@ COLOR_FAMILY_RAW_FIELDS = tuple(f"raw.{field}" for field in COLOR_FAMILY_FIELDS)
 
 
 def size_regex(size_text: str) -> str:
-    round_m = ROUND_SIZE_PATTERN.search(size_text.strip())
-    if round_m:
-        diameter = round_m.group(1)
-        return rf"(?<!\d){diameter}\s*['′]?\s*round\b"
-    m = SIZE_PATTERN.search(size_text.strip())
-    if not m:
-        return re.escape(size_text.strip())
-    a, b = m.group(1), m.group(2)
-    return rf"(?<!\d){a}\s*['′]?\s*[xX*]\s*{b}(?!\d)"
+    return size_field_regex(size_text)
 
 
 def classify_segment(segment: str) -> str:
@@ -106,7 +106,13 @@ def classify_segment(segment: str) -> str:
     lowered = [p.lower() for p in parts]
     seg_lower = segment.lower()
 
+    if len(parts) == 1 and normalise_catalog_tag(parts[0]):
+        return "catalog_tag"
+    if len(parts) == 1 and parts[0].lower() in CATALOG_TAG_KEYS:
+        return "catalog_tag"
     if len(parts) == 1 and SIZE_PATTERN.search(parts[0]):
+        return "size"
+    if len(parts) == 1 and DIA_ROUND_PATTERN.search(parts[0]):
         return "size"
     if len(parts) == 1 and ROUND_SIZE_PATTERN.search(parts[0]):
         return "size"
@@ -147,16 +153,29 @@ def _segment_search_tokens(segment: str, segment_type: str) -> list[str]:
 
     for part in parts:
         if segment_type == "size":
-            round_match = ROUND_SIZE_PATTERN.search(part)
-            if round_match:
-                tokens.append(round_match.group(1))
+            dia_match = DIA_ROUND_PATTERN.search(part)
+            if dia_match:
+                tokens.append(f"{dia_match.group(1)}diaround")
+                tokens.append(f"{dia_match.group(1)} round")
                 tokens.append("round")
             else:
-                match = SIZE_PATTERN.search(part)
-                if match:
-                    tokens.append(f"{match.group(1)}x{match.group(2)}")
+                round_match = ROUND_SIZE_PATTERN.search(part)
+                if round_match:
+                    tokens.append(round_match.group(1))
+                    tokens.append("round")
                 else:
-                    tokens.append(part)
+                    match = SIZE_PATTERN.search(part)
+                    if match:
+                        tokens.append(f"{match.group(1)}x{match.group(2)}")
+                    else:
+                        tokens.append(part)
+        elif segment_type == "catalog_tag":
+            tag = normalise_catalog_tag(part) or part
+            tokens.append(tag)
+            if tag == "new":
+                tokens.append("new")
+            elif tag == "swatch":
+                tokens.extend(("swatch", "swatches"))
         elif segment_type == "shape":
             tokens.append(SHAPE_ALIASES.get(part, part).lower())
         elif segment_type == "construction":
@@ -212,8 +231,6 @@ def segment_to_mongo_clause(segment: str, *, mixture_mode: bool = False) -> dict
 
     if segment_type == "construction" and len(tokens) > 1:
         clauses.append({"search_tokens": {"$all": tokens}})
-    elif segment_type == "size" and len(tokens) > 1:
-        clauses.append({"search_tokens": {"$all": tokens}})
     elif segment_type == "multicolor":
         clauses.append({"search_tokens": {"$in": list(dict.fromkeys(tokens))}})
     elif segment_type == "color":
@@ -239,6 +256,64 @@ def segment_to_mongo_clause(segment: str, *, mixture_mode: bool = False) -> dict
         else:
             clauses.append({"search_tokens": {"$in": unique_tokens}})
         clauses.extend(_regex_or_clauses(PATTERN_RAW_FIELDS, unique_tokens))
+    elif segment_type == "catalog_tag":
+        tag = normalise_catalog_tag(parts[0]) if parts else None
+        tag = tag or (tokens[0] if tokens else "")
+        unique_tokens = list(dict.fromkeys(tokens))
+        clauses.append({"search_tokens": {"$in": unique_tokens}})
+        if tag == "bestseller":
+            clauses.append({"raw.BestSellerStatus": True})
+            clauses.append({"raw.ProductTag": {"$regex": r"bestseller", "$options": "i"}})
+        elif tag == "new":
+            clauses.append({"raw.ProductTag": {"$regex": r"\bnew\b", "$options": "i"}})
+        elif tag == "outdoor":
+            clauses.append({"raw.ProductTag": {"$regex": r"outdoor", "$options": "i"}})
+        elif tag == "antique":
+            clauses.append({"raw.Quality": {"$regex": r"antique", "$options": "i"}})
+        elif tag == "swatch":
+            clauses.append({"raw.SizeGroupInFT": {"$regex": r"swatch", "$options": "i"}})
+        logger.info(f"[MONGO] catalog_tag clause tag={tag!r} tokens={unique_tokens}")
+    elif segment_type == "size":
+        unique_tokens = list(dict.fromkeys(tokens))
+        if len(unique_tokens) > 1:
+            clauses.append({"search_tokens": {"$all": unique_tokens}})
+        elif unique_tokens:
+            clauses.append({"search_tokens": unique_tokens[0]})
+        # SizeGroupInFT chips (8X10, 6 Dia Round) + SizeInFT/CM.
+        for token in unique_tokens:
+            a_b = SIZE_PATTERN.search(token)
+            if a_b:
+                clauses.append({
+                    "raw.SizeGroupInFT": {
+                        "$regex": rf"{a_b.group(1)}\s*[xX]\s*{a_b.group(2)}",
+                        "$options": "i",
+                    }
+                })
+                clauses.append({
+                    "raw.SizeInFT": {
+                        "$regex": size_regex(f"{a_b.group(1)}x{a_b.group(2)}"),
+                        "$options": "i",
+                    }
+                })
+            elif "diaround" in token or "round" in token:
+                clauses.append({
+                    "raw.SizeGroupInFT": {"$regex": re.escape(token), "$options": "i"}
+                })
+                num = re.search(r"(\d+(?:\.\d+)?)", token)
+                if num:
+                    clauses.append({
+                        "raw.SizeGroupInFT": {
+                            "$regex": rf"{num.group(1)}\s*dia\s*round",
+                            "$options": "i",
+                        }
+                    })
+            else:
+                clauses.append({
+                    "raw.SizeGroupInFT": {"$regex": re.escape(token), "$options": "i"}
+                })
+                clauses.append({
+                    "raw.SizeInFT": {"$regex": re.escape(token), "$options": "i"}
+                })
     elif len(tokens) == 1:
         clauses.append({"search_tokens": tokens[0]})
     else:
@@ -354,6 +429,27 @@ def product_matches_multicolor(product: dict) -> bool:
     return False
 
 
+def product_matches_catalog_tag(product: dict, tag: str) -> bool:
+    """Match website merchandising facets (New / Bestseller / Outdoor / Antique / Swatch)."""
+    key = normalise_catalog_tag(tag) or (tag or "").strip().lower()
+    if not key:
+        return False
+    product_tag = str(product.get("ProductTag") or "").strip().lower()
+    if key == "new":
+        return product_tag == "new" or bool(re.search(r"\bnew\b", product_tag))
+    if key == "bestseller":
+        if product.get("BestSellerStatus") is True:
+            return True
+        return "bestseller" in product_tag or "best seller" in product_tag
+    if key == "outdoor":
+        return "outdoor" in product_tag
+    if key == "antique":
+        return "antique" in str(product.get("Quality") or "").lower()
+    if key == "swatch":
+        return "swatch" in str(product.get("SizeGroupInFT") or "").lower()
+    return False
+
+
 def shape_field_matches(term: str, shape_value: str) -> bool:
     shape = (shape_value or "").lower().strip()
     if not shape or not term:
@@ -395,6 +491,9 @@ def part_matches_product(
     if segment_type == "multicolor":
         return product_matches_multicolor(product)
 
+    if segment_type == "catalog_tag":
+        return product_matches_catalog_tag(product, part_lower)
+
     if segment_type == "room":
         return any(
             part_lower in str(product.get(field) or "").lower()
@@ -411,11 +510,7 @@ def part_matches_product(
     if segment_type == "size":
         if parse_requested_cm_size(part):
             return product_matches_cm_size(product, part)
-        for field in fields:
-            val = str(product.get(field) or "")
-            if re.search(size_regex(part), val, re.IGNORECASE):
-                return True
-        return False
+        return product_matches_size_term(product, part)
 
     for field in fields:
         val = str(product.get(field) or "")
@@ -656,10 +751,7 @@ def _filter_by_size_ft(products: list[dict], size_terms: set) -> list[dict]:
     filtered = []
     for p in products:
         for term in size_terms:
-            if any(
-                re.search(size_regex(str(term)), str(p.get(field) or ""), re.IGNORECASE)
-                for field in ("SizeInFT", "SizeInCM")
-            ):
+            if product_matches_size_term(p, str(term)):
                 filtered.append(p)
                 break
     return filtered
@@ -673,6 +765,21 @@ def apply_attribute_post_filters(
     hard_size: bool = True,
 ) -> list[dict]:
     result = products
+
+    catalog_tags = attribute_filters.get("catalog_tag") or set()
+    if catalog_tags:
+        filtered = [
+            p for p in result
+            if any(product_matches_catalog_tag(p, tag) for tag in catalog_tags)
+        ]
+        if filtered:
+            logger.info(
+                f"[SEARCH] catalog_tag filter: {len(result)} → {len(filtered)} "
+                f"(tags={sorted(catalog_tags)})"
+            )
+            result = filtered
+        else:
+            return []
 
     shape_terms = attribute_filters.get("shape") or set()
     if shape_terms:

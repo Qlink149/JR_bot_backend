@@ -2,6 +2,19 @@ import re
 
 from qlink_chatbot.utils.jr_search_aliases import ROUND_SIZE_PATTERN, SIZE_PATTERN
 
+
+def size_field_regex(size_text: str) -> str:
+    """Regex for matching a size chip against SizeInFT / SizeInCM text."""
+    round_m = ROUND_SIZE_PATTERN.search(size_text.strip())
+    if round_m:
+        diameter = round_m.group(1)
+        return rf"(?<!\d){diameter}\s*['′]?\s*round\b"
+    m = SIZE_PATTERN.search(size_text.strip())
+    if not m:
+        return re.escape(size_text.strip())
+    a, b = m.group(1), m.group(2)
+    return rf"(?<!\d){a}\s*['′]?\s*[xX*]\s*{b}(?!\d)"
+
 CM_PER_FT = 30.48
 CM_PER_IN = 2.54
 CM_SIZE_TOLERANCE = 8
@@ -155,12 +168,71 @@ def product_sqft_from_ft_field(value: str) -> float | None:
     return None
 
 
+def normalize_size_group_token(term: str) -> str:
+    """Normalize SizeGroupInFT / user size chips for comparison (8x10 ↔ 8X10)."""
+    text = (term or "").lower().strip()
+    if not text:
+        return ""
+    text = text.replace("rugs", " ")
+    text = text.replace("ft.", " ").replace("ft", " ")
+    text = re.sub(r"['′]", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("*", "x")
+    return text
+
+
+def size_group_matches_term(size_group: str, term: str) -> bool:
+    """True when SizeGroupInFT equals a user size chip (incl. dia round / runner)."""
+    group_key = normalize_size_group_token(size_group)
+    term_key = normalize_size_group_token(term)
+    if not group_key or not term_key:
+        return False
+    if group_key == term_key:
+        return True
+    # "6 round" / "6' round" ↔ "6diaround"
+    round_user = re.fullmatch(r"(\d+(?:\.\d+)?)round", term_key)
+    if round_user and group_key in {
+        f"{round_user.group(1)}diaround",
+        f"{round_user.group(1)}round",
+    }:
+        return True
+    dia_user = re.fullmatch(r"(\d+(?:\.\d+)?)diaround", term_key)
+    if dia_user and group_key in {
+        f"{dia_user.group(1)}diaround",
+        f"{dia_user.group(1)}round",
+    }:
+        return True
+    return False
+
+
+def product_matches_size_term(product: dict, term: str) -> bool:
+    """Match SizeInFT/CM regex or SizeGroupInFT chip equality."""
+    term_text = str(term or "").strip()
+    if not term_text:
+        return False
+    pattern = size_field_regex(term_text)
+    for field in ("SizeInFT", "SizeInCM"):
+        if re.search(pattern, str(product.get(field) or ""), re.IGNORECASE):
+            return True
+    if size_group_matches_term(str(product.get("SizeGroupInFT") or ""), term_text):
+        return True
+    if size_group_matches_term(str(product.get("SizeGroupInCM") or ""), term_text):
+        return True
+    return False
+
+
 def product_matches_size_category(product: dict, category: str) -> bool:
     """Match catalog size buckets (small/medium/large/oversize) by rug area."""
     cat = (category or "").lower().strip()
     bounds = SIZE_CATEGORY_SQFT_RANGES.get(cat)
     if not bounds:
         return False
+
+    # Site "Oversize Rugs" SizeGroup chip — prefer label over sqft alone.
+    if cat == "oversize":
+        size_group = str(product.get("SizeGroupInFT") or "").lower()
+        if "oversize" in size_group:
+            return True
 
     sqft = product_sqft_from_ft_field(str(product.get("SizeInFT") or ""))
     if sqft is not None:
@@ -169,6 +241,6 @@ def product_matches_size_category(product: dict, category: str) -> bool:
 
     haystack = " ".join(
         str(product.get(field) or "")
-        for field in ("DisplayFilter", "SizeInFT", "MultiFilter")
+        for field in ("DisplayFilter", "SizeInFT", "SizeGroupInFT", "MultiFilter")
     ).lower()
     return bool(re.search(rf"\b{re.escape(cat)}\b", haystack))

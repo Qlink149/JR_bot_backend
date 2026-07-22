@@ -246,9 +246,11 @@ def build_product_recommendation_reason(
             non_color_filters.append(f"price {word} {currency} {int(price_filter['amount'])}")
 
     for key, label in (
+        ("catalog_tag", "catalog_tag"),
         ("shape", "shape"),
         ("size", "size"),
         ("size_cm", "size_cm"),
+        ("size_category", "size_category"),
         ("material", "material"),
         ("construction", "construction"),
         ("pattern", "pattern"),

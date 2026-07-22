@@ -786,11 +786,26 @@ def _bulk_sync_website_products(products: list[dict]) -> dict:
 
 
 @dashboard_router.post("/backfill-search-tokens")
-def backfill_product_search_tokens(batch_size: int = 1000, rebuild_all: bool = False):
-    """Index search_tokens on Mongo product docs (loop until remaining_without_tokens=0)."""
+def backfill_product_search_tokens(
+    batch_size: int = 1000,
+    rebuild_all: bool = False,
+    after_id: str | None = None,
+):
+    """Index search_tokens on Mongo product docs.
+
+    After tokenizer changes (ProductTag / BestSeller / SizeGroup chips), call with
+    ``rebuild_all=true`` and page via ``after_id`` until ``last_id`` is null.
+    """
+    from bson import ObjectId
+
     from qlink_chatbot.utils.jr_search_index import backfill_search_tokens
 
-    return backfill_search_tokens(batch_size=batch_size, rebuild_all=rebuild_all)
+    oid = ObjectId(after_id) if after_id else None
+    return backfill_search_tokens(
+        batch_size=batch_size,
+        rebuild_all=rebuild_all,
+        after_id=oid,
+    )
 
 
 @dashboard_router.post("/sync-products")

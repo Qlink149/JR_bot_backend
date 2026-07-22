@@ -1,8 +1,10 @@
 import re
 
 from qlink_chatbot.utils.jr_search_aliases import (
+    CATALOG_TAG_ALIASES,
     COLOR_ALIASES,
     CONSTRUCTION_KEYWORDS,
+    DIA_ROUND_PATTERN,
     MATERIAL_KEYWORDS,
     MULTICOLOR_KEYS,
     NOISE_WORDS,
@@ -15,6 +17,7 @@ from qlink_chatbot.utils.jr_search_aliases import (
     SIZE_PATTERN,
     WEIGHT_PATTERN,
     color_search_terms,
+    normalise_catalog_tag,
     normalise_size_category,
 )
 from qlink_chatbot.utils.jr_search_currency import extract_price_filter_from_text
@@ -72,6 +75,11 @@ def preprocess_natural_language(keyword: str) -> str:
     found: list[str] = []
     remaining = " ".join(words)
 
+    for alias in sorted(CATALOG_TAG_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+            found.append(CATALOG_TAG_ALIASES[alias])
+            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+
     for kw in sorted(CONSTRUCTION_KEYWORDS, key=len, reverse=True):
         if kw in remaining:
             found.append(kw)
@@ -92,6 +100,12 @@ def preprocess_natural_language(keyword: str) -> str:
             found.append("multicolor")
             remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
             break
+
+    for match in DIA_ROUND_PATTERN.finditer(remaining):
+        found.append(f"{match.group(1)} dia round")
+        if "round" not in found:
+            found.append("round")
+    remaining = DIA_ROUND_PATTERN.sub(" ", remaining).strip()
 
     for match in ROUND_SIZE_PATTERN.finditer(remaining):
         found.append(f"{match.group(1)} round")
@@ -153,6 +167,11 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
     if not key:
         return
 
+    tag = normalise_catalog_tag(key)
+    if tag:
+        attribute_filters["catalog_tag"].add(tag)
+        return
+
     if key in MULTICOLOR_KEYS:
         attribute_filters["multicolor"].add("multicolor")
         return
@@ -185,6 +204,12 @@ def track_attribute_terms(segment_key: str, attribute_filters: dict[str, set]) -
                 attribute_filters["size_cm"].add(normalise_cm_size_term(a, b))
             else:
                 attribute_filters["size"].add(f"{a}x{b}".lower())
+        return
+
+    dia_match = DIA_ROUND_PATTERN.search(key)
+    if dia_match:
+        attribute_filters["size"].add(f"{dia_match.group(1)} dia round".lower())
+        attribute_filters["shape"].add("round")
         return
 
     round_match = ROUND_SIZE_PATTERN.search(key)
@@ -225,6 +250,7 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         "size_category": set(),
         "material": set(), "construction": set(), "pattern": set(),
         "room": set(), "weight_max": set(), "multicolor": set(),
+        "catalog_tag": set(),
     }
 
     for segment in keyword.split("&"):
@@ -232,6 +258,7 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         if not segment:
             continue
 
+        segment = DIA_ROUND_PATTERN.sub(lambda m: f"{m.group(1)} dia round", segment)
         segment = ROUND_SIZE_PATTERN.sub(lambda m: f"{m.group(1)} round", segment)
         size_match = SIZE_PATTERN.search(segment)
         if size_match:
@@ -267,6 +294,11 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
         key = segment.strip().lower()
         track_attribute_terms(key, attribute_filters)
         if normalise_size_category(key):
+            continue
+        tag = normalise_catalog_tag(key)
+        if tag:
+            # Keep canonical tag token in clean_keyword for Mongo recall.
+            clean_segments.append(tag)
             continue
 
         expanded = expand_term(segment, multi_attribute=multi_attribute)

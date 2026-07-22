@@ -36,6 +36,7 @@ def _v2_raw(**overrides) -> dict:
         "constructions": [],
         "patterns": [],
         "rooms": [],
+        "catalog_tags": [],
         "multicolor": False,
         "weight_max_kg": None,
         "has_price_filter": False,
@@ -111,9 +112,9 @@ def test_merge_prefer_llm_price():
 
 
 def test_validate_drops_unknown_color():
-    attrs, dropped = validate_extracted_attributes(_v2_raw(colors=["turquoise"]))
+    attrs, dropped = validate_extracted_attributes(_v2_raw(colors=["chartreuse"]))
     assert attrs["colors"] == []
-    assert any("color:turquoise" in d for d in dropped)
+    assert any("color:chartreuse" in d for d in dropped)
 
 
 def test_validate_accepts_catalog_color():

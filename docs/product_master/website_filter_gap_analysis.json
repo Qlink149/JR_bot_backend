@@ -1,0 +1,125 @@
+{
+  "fetched_at": "2026-07-23",
+  "source": "POST https://webapi.jaipurrugs.com/api/WebsiteMaster/product-master",
+  "product_count": 15272,
+  "local_files": {
+    "full": "docs/product_master/product_master_full.json",
+    "sample": "docs/product_master/product_master_sample.json",
+    "inventory": "docs/product_master/product_master_field_inventory.json"
+  },
+  "verdict": "Product Master already has almost all website filter facets. Gaps are mostly search/extraction wiring + one missing field (discount %). Ready-to-ship on the site is NOT QuickShipStatus.",
+  "filters": [
+    {
+      "website": "Availability / ready to ship",
+      "api_fields": ["LiveStatus", "Published", "Inventory", "QuickShipStatus", "ShippingDay"],
+      "api_has_data": true,
+      "notes": "Site count ~13795. QuickShipStatus=True is only 343 — that is NOT site ready-to-ship. Our sync uses LiveStatus∧Published as flags.inStock (~14490). Inventory is always >0 in this dump.",
+      "our_search": "partial",
+      "improve": "Optional QuickShipStatus filter for true quick-ship; keep inStock as Live+Published."
+    },
+    {
+      "website": "SIZE (ft.) including dia round / runner / square / oversize",
+      "api_fields": ["SizeInFT", "SizeGroupInFT", "SizeInCM", "SizeGroupInCM", "Shape"],
+      "api_has_data": true,
+      "notes": "SizeGroupInFT already buckets 8X10, Runner, Oversize Rugs, 6 Dia Round, etc. — matches site taxonomy closely.",
+      "our_search": "partial",
+      "improve": "Prefer SizeGroupInFT for size filters (not only SizeInFT regex). Map '6 dia round', runner, square, oversize rugs to SizeGroupInFT tokens."
+    },
+    {
+      "website": "COLOR (Grey, Purple, Brown, White, Cyan…)",
+      "api_fields": ["GrColor", "BrColor", "ColorFamily", "DisplayFilter", "BasicColor", "ColorMood"],
+      "api_has_data": true,
+      "notes": "DisplayFilter sparse (2.6%). Site color chips align more with ColorFamily / DisplayFilter than yarn %. Catalog-first search already addresses this.",
+      "our_search": "good_after_catalog_first",
+      "improve": "Expand alias map to site chip names (Cyan, Grey spelling). Use ColorFamily carefully for single-color vs mixture."
+    },
+    {
+      "website": "MATERIAL (wool, wool and bamboo silk, afghan wool…)",
+      "api_fields": ["Material", "MaterialDetails", "MaterialFamilies"],
+      "api_has_data": true,
+      "notes": "MaterialFamilies matches site list better (Afghan Wool, Jute and Hemp, Tencil, PET).",
+      "our_search": "partial",
+      "improve": "Index/search MaterialFamilies as primary material facet; keep Material as secondary."
+    },
+    {
+      "website": "PRICE RANGE (INR buckets)",
+      "api_fields": ["INR_MRP", "USD_MRP", "EUR_MRP", "GBP_MRP", "AED_MRP", "AUD_MRP", "CHF_MRP", "SGD_MRP"],
+      "api_has_data": true,
+      "notes": "All currency MRP fields present. We already support price_filter; can hardcode site INR bucket presets.",
+      "our_search": "good",
+      "improve": "Named buckets: under 20k / 20–50k / … / above 3L for LLM+regex."
+    },
+    {
+      "website": "SHAPE",
+      "api_fields": ["Shape"],
+      "api_has_data": true,
+      "notes": "Rectangle, Irregular, Runner, Round, Square, Oval, OCT — matches site.",
+      "our_search": "good",
+      "improve": "Normalize case (rectangle vs Rectangle)."
+    },
+    {
+      "website": "WEAVING TECHNIQUES",
+      "api_fields": ["Construction"],
+      "api_has_data": true,
+      "notes": "Hand Knotted / Hand Tufted / Hand Loom / Flat Weaves / Shag present (case noise).",
+      "our_search": "good",
+      "improve": "Normalize Construction casing in sync/tokens."
+    },
+    {
+      "website": "STYLE",
+      "api_fields": ["Style"],
+      "api_has_data": true,
+      "notes": "Modern / Traditional / Transitional — case duplicates in raw data.",
+      "our_search": "partial",
+      "improve": "Ensure Style is a first-class attribute_filter (not only pattern/general)."
+    },
+    {
+      "website": "PATTERN",
+      "api_fields": ["Pattern", "StylePattern"],
+      "api_has_data": true,
+      "notes": "Abstract, Floral and Tropical, Geometric and Stripes, Graphic and Art Deco, etc.",
+      "our_search": "partial",
+      "improve": "Broader pattern aliases for site labels (moroccan and tribal, oriental and traditional)."
+    },
+    {
+      "website": "DISCOUNT (10%/20%/…)",
+      "api_fields": [],
+      "api_has_data": false,
+      "notes": "No Discount / DiscountPercent field on Product Master. ClearanceStatus exists (545 True) but is not % off.",
+      "our_search": "missing",
+      "improve": "Cannot support % discount from Product Master alone; need another JR endpoint or scrape. Optional ClearanceStatus filter only."
+    },
+    {
+      "website": "DESIGNER",
+      "api_fields": ["Designer"],
+      "api_has_data": true,
+      "notes": "1658 products have Designer (Kavi, Ashiesh Shah, Abin Chaudhary, …).",
+      "our_search": "partial",
+      "improve": "Explicit designer attribute + aliases; already in search_tokens via Designer field."
+    },
+    {
+      "website": "COLLECTION",
+      "api_fields": ["Collection", "Name"],
+      "api_has_data": true,
+      "notes": "100% present. Site names like Erbe / Uvenuti / Aalam match. Some site names may differ slightly (Manchaha vs Freedom Manchaha).",
+      "our_search": "partial",
+      "improve": "Collection as dedicated filter (exact/token), not buried in general text."
+    }
+  ],
+  "fields_we_underuse": [
+    "SizeGroupInFT",
+    "SizeGroupInCM",
+    "MaterialFamilies",
+    "Designer",
+    "Collection",
+    "QuickShipStatus",
+    "ClearanceStatus",
+    "BestSellerStatus",
+    "ProductTag",
+    "Texture",
+    "Room"
+  ],
+  "fields_api_missing_vs_site": [
+    "Discount percent buckets"
+  ]
+}
