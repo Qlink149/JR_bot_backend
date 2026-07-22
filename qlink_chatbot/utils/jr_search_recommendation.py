@@ -7,15 +7,51 @@ from qlink_chatbot.utils.jr_search_color_breakdown import (
 )
 from qlink_chatbot.utils.jr_search_mongo import (
     color_field_matches,
+    product_matches_catalog_color,
     product_matches_color_terms,
     product_matches_exact_grcolor_terms,
+    size_regex,
 )
+import re
 
 COLOR_TIER_METHOD = {
+    "exact_catalog_color": "catalog_label",
+    "similar_catalog_color": "catalog_label",
+    "mixture_catalog_color": "catalog_label",
+    "multicolor": "catalog_label",
+    "breakdown_fallback": "product_color_breakdown",
+    # Legacy tiers (older logs / skip_color_post_filter paths)
     "exact_color_breakdown": "product_color_breakdown",
     "similar_color_breakdown": "product_color_breakdown",
     "similar_color": "grcolor_colorfamily",
 }
+
+
+def _sole_dominant_requested(
+    by_color: dict,
+    exact_color_terms: set[str],
+) -> bool:
+    """True when a requested palette color is the sole max % in matched breakdown."""
+    if not by_color:
+        return False
+    palette = user_terms_to_breakdown_colors(set(exact_color_terms or set()))
+    if not palette:
+        return False
+    mx = max(by_color.values())
+    max_colors = {c for c, p in by_color.items() if p == mx}
+    return len(max_colors) == 1 and bool(max_colors & palette)
+
+
+def _product_matches_size_terms(product: dict, size_terms: set[str]) -> bool:
+    if not size_terms:
+        return False
+    for term in size_terms:
+        if any(
+            re.search(size_regex(str(term)), str(product.get(field) or ""), re.IGNORECASE)
+            for field in ("SizeInFT", "SizeInCM")
+        ):
+            return True
+    return False
 
 
 def compute_color_match_score(
@@ -24,13 +60,16 @@ def compute_color_match_score(
     match_terms: set[str],
     exact_color_terms: set[str],
     breakdown_by_sku: dict[str, list[dict]] | None,
+    size_terms: set[str] | None = None,
+    size_relaxed: bool = False,
 ) -> dict:
     """
     Rank key (highest first):
-    1) matched JR.product_color breakdown % (sum, then max single color)
-    2) GrColor text hit (exact user color word first)
-    3) ColorFamily text hit
-    4) BrColor text hit
+    1) catalog GrColor / DisplayFilter hit (exact user word > alias)
+    2) sole-dominant requested yarn color
+    3) matched JR.product_color % (sum, then max)
+    4) ColorFamily hit (weaker)
+    5) exact size hit (when size was requested / relaxed)
     """
     terms = set(match_terms or set())
     for term in exact_color_terms or set():
@@ -42,25 +81,42 @@ def compute_color_match_score(
     pct_max = round(max(by_color.values()), 2) if by_color else 0.0
 
     catalog_hits = _catalog_color_hits(product, terms) if terms else {}
-    exact_grcolor = (
+    exact_user_grcolor = (
         product_matches_exact_grcolor_terms(product, exact_color_terms)
         if exact_color_terms
         else False
     )
+    catalog_primary = product_matches_catalog_color(product, terms) if terms else False
+    # 2 = exact user color on GrColor, 1 = alias/DisplayFilter catalog hit, 0 = none
+    catalog_score = 2 if exact_user_grcolor else (1 if catalog_primary else 0)
+    sole_dom = _sole_dominant_requested(by_color, exact_color_terms or set())
+    exact_size = _product_matches_size_terms(product, size_terms or set())
+    # When size was relaxed, prefer still-exact sizes; when not relaxed, all already match.
+    size_score = 1 if exact_size else 0
+    if not size_terms:
+        size_score = 0
 
     return {
         "pct_sum": pct_sum,
         "pct_max": pct_max,
-        "exact_grcolor": exact_grcolor,
+        "exact_grcolor": exact_user_grcolor,
+        "catalog_primary": catalog_primary,
+        "catalog_score": catalog_score,
+        "sole_dominant": sole_dom,
         "grcolor_hit": bool(catalog_hits.get("GrColor")),
+        "displayfilter_hit": bool(catalog_hits.get("DisplayFilter")),
         "colorfamily_hit": bool(catalog_hits.get("ColorFamily")),
         "brcolor_hit": bool(catalog_hits.get("BrColor")),
+        "exact_size": exact_size,
+        "size_relaxed": size_relaxed,
         "breakdown_matched": by_color,
         "sort_key": (
+            catalog_score,
+            1 if sole_dom else 0,
             pct_sum,
             pct_max,
-            1 if exact_grcolor else int(catalog_hits.get("GrColor", False)),
             int(catalog_hits.get("ColorFamily", False)),
+            size_score,
             int(catalog_hits.get("BrColor", False)),
         ),
     }
@@ -73,6 +129,8 @@ def rank_products_by_color_match(
     exact_color_terms: set[str],
     breakdown_by_sku: dict[str, list[dict]] | None,
     color_search_tier: str | None,
+    size_terms: set[str] | None = None,
+    size_relaxed: bool = False,
 ) -> list[tuple[dict, dict]]:
     """Return products sorted best color match first (stable for ties)."""
     if not products:
@@ -84,7 +142,10 @@ def rank_products_by_color_match(
         or exact_color_terms
     )
     if not has_color_signal:
-        return [(p, {"sort_key": (0, 0, 0, 0, 0), "rank_method": "catalog_order"}) for p in products]
+        return [
+            (p, {"sort_key": (0, 0, 0, 0, 0, 0, 0), "rank_method": "catalog_order"})
+            for p in products
+        ]
 
     scored: list[tuple[dict, dict]] = []
     for product in products:
@@ -93,6 +154,8 @@ def rank_products_by_color_match(
             match_terms=match_terms,
             exact_color_terms=exact_color_terms,
             breakdown_by_sku=breakdown_by_sku,
+            size_terms=size_terms,
+            size_relaxed=size_relaxed,
         )
         score["rank_method"] = "color_relevance"
         scored.append((product, score))
@@ -108,6 +171,8 @@ def select_top_products(
     exact_color_terms: set[str],
     breakdown_by_sku: dict[str, list[dict]] | None,
     color_search_tier: str | None,
+    size_terms: set[str] | None = None,
+    size_relaxed: bool = False,
     limit: int = 3,
 ) -> tuple[list[dict], list[dict]]:
     """Pick top N products by color relevance instead of random sampling."""
@@ -117,6 +182,8 @@ def select_top_products(
         exact_color_terms=exact_color_terms,
         breakdown_by_sku=breakdown_by_sku,
         color_search_tier=color_search_tier,
+        size_terms=size_terms,
+        size_relaxed=size_relaxed,
     )
     top = ranked[:limit]
     return [p for p, _ in top], [s for _, s in top]
@@ -127,10 +194,12 @@ def _catalog_color_hits(product: dict, terms: set[str]) -> dict[str, bool]:
     grcolor = str(product.get("GrColor") or "")
     brcolor = str(product.get("BrColor") or "")
     family = str(product.get("ColorFamily") or "")
+    display = str(product.get("DisplayFilter") or "")
     return {
         "GrColor": any(color_field_matches(term, grcolor) for term in terms),
         "BrColor": any(color_field_matches(term, brcolor) for term in terms),
         "ColorFamily": any(color_field_matches(term, family) for term in terms),
+        "DisplayFilter": any(color_field_matches(term, display) for term in terms),
     }
 
 
@@ -146,6 +215,7 @@ def build_product_recommendation_reason(
     displayable_pool_size: int,
     rank: int | None = None,
     rank_score: dict | None = None,
+    size_relaxed: bool = False,
 ) -> dict:
     sku = str(product.get("SKU") or product.get("BarCode") or "").strip()
     terms = set(match_terms or set())
@@ -185,22 +255,47 @@ def build_product_recommendation_reason(
         ("room", "room"),
         ("multicolor", "multicolor"),
     ):
+        # When size was relaxed, don't claim an exact size match in the summary.
+        if size_relaxed and key in {"size", "size_cm"}:
+            continue
         values = attribute_filters.get(key) or set()
         if values:
             non_color_filters.append(f"{label}={sorted(values)}")
 
     summary_parts: list[str] = []
 
-    if color_match_method == "product_color_breakdown":
+    if color_match_method == "catalog_label":
+        hits = [field for field, ok in catalog_hits.items() if ok]
+        tier_word = color_search_tier or "catalog"
+        if hits:
+            summary_parts.append(
+                f"Color via catalog labels ({tier_word}) on {', '.join(hits)} "
+                f"(GrColor={product.get('GrColor')!r}, "
+                f"DisplayFilter={product.get('DisplayFilter')!r}, "
+                f"ColorFamily={product.get('ColorFamily')!r})"
+            )
+        else:
+            summary_parts.append(
+                f"Color tier {tier_word}; catalog "
+                f"GrColor={product.get('GrColor')!r}, "
+                f"ColorFamily={product.get('ColorFamily')!r}"
+            )
         matched = breakdown.get("by_color") or {}
         if matched:
             pct_bits = ", ".join(
                 f"{color} {pct:g}%"
                 for color, pct in sorted(matched.items(), key=lambda x: -x[1])
             )
-            tier_word = "exact" if color_search_tier == "exact_color_breakdown" else "similar"
+            summary_parts.append(f"Yarn breakdown (rank signal): {pct_bits}")
+    elif color_match_method == "product_color_breakdown":
+        matched = breakdown.get("by_color") or {}
+        if matched:
+            pct_bits = ", ".join(
+                f"{color} {pct:g}%"
+                for color, pct in sorted(matched.items(), key=lambda x: -x[1])
+            )
             summary_parts.append(
-                f"Color via JR.product_color breakdown ({tier_word}): {pct_bits}"
+                f"Color via JR.product_color breakdown fallback: {pct_bits}"
             )
         else:
             summary_parts.append(
@@ -209,7 +304,7 @@ def build_product_recommendation_reason(
         summary_parts.append(
             f"Catalog labels — GrColor={product.get('GrColor')!r}, "
             f"BrColor={product.get('BrColor')!r}, ColorFamily={product.get('ColorFamily')!r} "
-            "(informational; filter used percentage breakdown, not these labels)"
+            "(weaker breakdown_fallback tier)"
         )
     elif color_match_method == "grcolor_colorfamily" and terms:
         hits = [field for field, ok in catalog_hits.items() if ok]
@@ -234,12 +329,21 @@ def build_product_recommendation_reason(
     else:
         summary_parts.append("No color filter on this search")
 
+    if size_relaxed:
+        summary_parts.append(
+            "Size relaxed: no exact size match for this color — showing closest color matches"
+        )
+
     if non_color_filters:
         summary_parts.append("Also matched: " + "; ".join(non_color_filters))
 
     if rank_score and rank_score.get("rank_method") == "color_relevance":
         pct_bits = rank_score.get("breakdown_matched") or {}
         rank_detail_parts: list[str] = []
+        if rank_score.get("catalog_score"):
+            rank_detail_parts.append(f"catalog_score={rank_score.get('catalog_score')}")
+        if rank_score.get("sole_dominant"):
+            rank_detail_parts.append("sole-dominant yarn color")
         if pct_bits:
             rank_detail_parts.append(
                 "breakdown "
@@ -250,10 +354,12 @@ def build_product_recommendation_reason(
             )
         if rank_score.get("exact_grcolor") or rank_score.get("grcolor_hit"):
             rank_detail_parts.append("GrColor match")
+        if rank_score.get("displayfilter_hit"):
+            rank_detail_parts.append("DisplayFilter match")
         if rank_score.get("colorfamily_hit"):
             rank_detail_parts.append("ColorFamily match")
-        if rank_score.get("brcolor_hit"):
-            rank_detail_parts.append("BrColor match")
+        if rank_score.get("exact_size"):
+            rank_detail_parts.append("exact size")
         detail = f" ({'; '.join(rank_detail_parts)})" if rank_detail_parts else ""
         summary_parts.append(
             f"Ranked #{rank or '?'} of {displayable_pool_size} by color relevance{detail}"
@@ -269,6 +375,7 @@ def build_product_recommendation_reason(
         "name": (product.get("Name") or product.get("Collection") or "").strip(),
         "color_match_method": color_match_method,
         "color_search_tier": color_search_tier,
+        "size_relaxed": size_relaxed,
         "search_color_terms": sorted(terms),
         "breakdown_palette_colors": sorted(breakdown_palette),
         "breakdown_matched_percentages": breakdown.get("by_color") or {},

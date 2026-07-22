@@ -186,7 +186,16 @@ def _regex_or_clauses(field_names: tuple[str, ...], tokens: list[str]) -> list[d
     return clauses
 
 
-def segment_to_mongo_clause(segment: str) -> dict:
+def keyword_has_mixture_colors(clean_keyword: str) -> bool:
+    """True when keyword has multicolor or 2+ color segments (e.g. pink&purple)."""
+    segments = [s.strip() for s in (clean_keyword or "").split("&") if s.strip()]
+    if any(classify_segment(seg) == "multicolor" for seg in segments):
+        return True
+    color_segments = [seg for seg in segments if classify_segment(seg) == "color"]
+    return len(color_segments) >= 2
+
+
+def segment_to_mongo_clause(segment: str, *, mixture_mode: bool = False) -> dict:
     """Indexed token query with compact field fallback for older synced docs."""
     parts = [p.strip() for p in segment.split("||") if p.strip()]
     if not parts:
@@ -208,33 +217,21 @@ def segment_to_mongo_clause(segment: str) -> dict:
     elif segment_type == "multicolor":
         clauses.append({"search_tokens": {"$in": list(dict.fromkeys(tokens))}})
     elif segment_type == "color":
-        breakdown_colors = user_terms_to_breakdown_colors(set(tokens))
-        if breakdown_colors and breakdown_colors_index_ready():
-            logger.info(
-                f"[MONGO] color breakdown clause colors={sorted(breakdown_colors)} "
-                "(indexed breakdown_colors)"
-            )
-            clauses.append({"breakdown_colors": {"$in": list(breakdown_colors)}})
-        elif breakdown_colors:
-            matching_skus = instock_skus_for_breakdown_colors(breakdown_colors)
-            if matching_skus:
-                logger.info(
-                    f"[MONGO] color breakdown clause colors={sorted(breakdown_colors)} "
-                    f"skus={len(matching_skus)}"
-                )
-                clauses.append({"raw.SKU": {"$in": list(matching_skus)}})
-            else:
-                unique_tokens = list(dict.fromkeys(tokens))
-                clauses.append({"search_tokens": {"$in": unique_tokens}})
-                clauses.extend(_regex_or_clauses(COLOR_RAW_FIELDS, unique_tokens))
-                if not color_match_is_strict(set(unique_tokens)):
-                    clauses.extend(_regex_or_clauses(COLOR_FAMILY_RAW_FIELDS, unique_tokens))
-        else:
-            unique_tokens = list(dict.fromkeys(tokens))
-            clauses.append({"search_tokens": {"$in": unique_tokens}})
-            clauses.extend(_regex_or_clauses(COLOR_RAW_FIELDS, unique_tokens))
-            if not color_match_is_strict(set(unique_tokens)):
-                clauses.extend(_regex_or_clauses(COLOR_FAMILY_RAW_FIELDS, unique_tokens))
+        # Catalog-first recall (website-style labels). Yarn % / breakdown_colors
+        # is applied later as a weaker post-filter fallback, not the Mongo gate.
+        unique_tokens = list(dict.fromkeys(tokens))
+        clauses.append({"search_tokens": {"$in": unique_tokens}})
+        clauses.extend(_regex_or_clauses(COLOR_RAW_FIELDS, unique_tokens))
+        clauses.extend(_regex_or_clauses(("raw.DisplayFilter",), unique_tokens))
+        # ColorFamily: mixture intent (pink&purple) and non-strict palettes.
+        # Strict single pink/red keeps ColorFamily out so "Pink and Purple" isn't recalled.
+        if mixture_mode or not color_match_is_strict(set(unique_tokens)):
+            clauses.extend(_regex_or_clauses(COLOR_FAMILY_RAW_FIELDS, unique_tokens))
+        logger.info(
+            f"[MONGO] color catalog clause tokens={unique_tokens} "
+            f"mixture_mode={mixture_mode} "
+            "(GrColor/DisplayFilter/tokens; breakdown not used for recall)"
+        )
     elif segment_type == "pattern":
         unique_tokens = list(dict.fromkeys(tokens))
         if len(unique_tokens) == 1:
@@ -273,16 +270,77 @@ def product_matches_exact_grcolor_terms(product: dict, terms: set[str]) -> bool:
     return False
 
 
-def product_matches_color_terms(product: dict, terms: set[str]) -> bool:
-    """Match on ground color (GrColor) and, for broad palettes, ColorFamily — not border-only."""
-    fields = list(COLOR_MATCH_FIELDS)
-    if not color_match_is_strict(terms):
-        fields.extend(COLOR_FAMILY_FIELDS)
+def product_matches_catalog_color(product: dict, terms: set[str]) -> bool:
+    """Strong single-color match: GrColor or DisplayFilter (not ColorFamily mixtures)."""
     for term in terms:
-        for field in fields:
+        if color_field_matches(term, str(product.get("GrColor") or "")):
+            return True
+        if color_field_matches(term, str(product.get("DisplayFilter") or "")):
+            return True
+    return False
+
+
+def product_matches_color_family_terms(product: dict, terms: set[str]) -> bool:
+    """Weaker catalog match via ColorFamily / ColorMood / BasicColor."""
+    for term in terms:
+        for field in COLOR_FAMILY_FIELDS:
             if color_field_matches(term, str(product.get(field) or "")):
                 return True
     return False
+
+
+def product_matches_single_color_family(product: dict, terms: set[str]) -> bool:
+    """ColorFamily hit for single-color intent — reject mixture families like 'Pink and Purple'."""
+    family = str(product.get("ColorFamily") or "").strip()
+    if re.search(r"\band\b", family, re.IGNORECASE):
+        return False
+    return product_matches_color_family_terms(product, terms)
+
+
+def product_matches_color_terms(
+    product: dict,
+    terms: set[str],
+    *,
+    mixture_mode: bool = False,
+) -> bool:
+    """Match on ground color (GrColor/DisplayFilter) and, for broad/mixture, ColorFamily."""
+    if product_matches_catalog_color(product, terms):
+        return True
+    if mixture_mode or not color_match_is_strict(terms):
+        return product_matches_color_family_terms(product, terms)
+    return False
+
+
+def product_matches_mixture_colors(
+    product: dict,
+    exact_color_terms: set[str],
+    *,
+    breakdown_by_sku: dict[str, list[dict]] | None = None,
+) -> bool:
+    """Require evidence for each exact color (catalog label, family, or yarn %)."""
+    if not exact_color_terms:
+        return False
+    for exact in exact_color_terms:
+        terms = set(color_search_terms(exact))
+        if product_matches_catalog_color(product, terms):
+            continue
+        if product_matches_color_family_terms(product, terms):
+            continue
+        breakdown_colors = user_terms_to_breakdown_colors(terms)
+        if breakdown_colors and product_matches_color_breakdown(
+            product, breakdown_colors, breakdown_by_sku or {},
+        ):
+            continue
+        return False
+    return True
+
+
+def is_mixture_color_intent(attribute_filters: dict[str, set]) -> bool:
+    """True when user asked for multicolor or 2+ exact colors (e.g. pink&purple)."""
+    if attribute_filters.get("multicolor"):
+        return True
+    exact = attribute_filters.get("color_exact") or set()
+    return len(exact) >= 2
 
 
 def product_matches_multicolor(product: dict) -> bool:
@@ -304,16 +362,21 @@ def shape_field_matches(term: str, shape_value: str) -> bool:
     return shape == catalog.lower() or term.lower() == shape
 
 
-def part_matches_product(product: dict, part: str, segment_type: str) -> bool:
+def part_matches_product(
+    product: dict,
+    part: str,
+    segment_type: str,
+    *,
+    mixture_mode: bool = False,
+) -> bool:
     part_lower = part.strip().lower()
     if not part_lower:
         return False
 
     if segment_type == "color":
-        breakdown_colors = user_terms_to_breakdown_colors(set(color_search_terms(part)))
-        if breakdown_colors:
-            return product_matches_color_breakdown(product, breakdown_colors)
-        return product_matches_color_terms(product, set(color_search_terms(part)))
+        terms = set(color_search_terms(part))
+        # Catalog-first for candidate filtering; breakdown is a pipeline fallback.
+        return product_matches_color_terms(product, terms, mixture_mode=mixture_mode)
 
     if segment_type == "shape":
         return shape_field_matches(part_lower, str(product.get("Shape") or ""))
@@ -366,6 +429,7 @@ def product_matches_segment(
     segment: str,
     *,
     skip_color_check: bool = False,
+    mixture_mode: bool = False,
 ) -> bool:
     parts = [p.strip() for p in segment.split("||") if p.strip()]
     if not parts:
@@ -373,7 +437,10 @@ def product_matches_segment(
     segment_type = classify_segment(segment)
     if skip_color_check and segment_type == "color":
         return True
-    return any(part_matches_product(product, p, segment_type) for p in parts)
+    return any(
+        part_matches_product(product, p, segment_type, mixture_mode=mixture_mode)
+        for p in parts
+    )
 
 
 def filter_products_by_clean_keyword(
@@ -385,30 +452,24 @@ def filter_products_by_clean_keyword(
     segments = [s.strip() for s in clean_keyword.split("&") if s.strip()]
     if not segments:
         return products
+    mixture_mode = keyword_has_mixture_colors(clean_keyword)
     return [
         p for p in products
         if all(
-            product_matches_segment(p, seg, skip_color_check=skip_color_check)
+            product_matches_segment(
+                p,
+                seg,
+                skip_color_check=skip_color_check,
+                mixture_mode=mixture_mode,
+            )
             for seg in segments
         )
     ]
 
 
 def segment_uses_breakdown_clause(segment: str) -> bool:
-    if classify_segment(segment) != "color":
-        return False
-    parts = [p.strip() for p in segment.split("||") if p.strip()]
-    if not parts:
-        return False
-    tokens = color_search_terms(parts[0]) if len(parts) == 1 else []
-    if not tokens:
-        return False
-    breakdown_colors = user_terms_to_breakdown_colors(set(tokens))
-    if not breakdown_colors:
-        return False
-    if breakdown_colors_index_ready():
-        return True
-    return bool(instock_skus_for_breakdown_colors(breakdown_colors))
+    """Deprecated for primary recall — catalog-first search never prefilters by yarn %."""
+    return False
 
 
 def breakdown_colors_for_keyword(clean_keyword: str) -> set[str]:
@@ -501,6 +562,25 @@ def mongo_search_cm_products(size_cm_terms: set[str], candidate_limit: int = CAN
     return matched[:candidate_limit]
 
 
+def strip_size_segments_from_keyword(clean_keyword: str) -> str:
+    """Drop ft/cm size segments so color recall can widen beyond exact size."""
+    kept: list[str] = []
+    for segment in [s.strip() for s in (clean_keyword or "").split("&") if s.strip()]:
+        if classify_segment(segment) == "size":
+            continue
+        kept.append(segment)
+    return "&".join(kept)
+
+
+def filters_without_size(attribute_filters: dict[str, set]) -> dict[str, set]:
+    out: dict[str, set] = {}
+    for key, values in (attribute_filters or {}).items():
+        if key in {"size", "size_cm", "size_category"}:
+            continue
+        out[key] = set(values) if values else set()
+    return out
+
+
 def mongo_search_products(
     clean_keyword: str,
     candidate_limit: int = CANDIDATE_LIMIT,
@@ -534,7 +614,12 @@ def mongo_search_products(
         )
         return results, True
 
-    and_clauses = [clause for seg in segments if (clause := segment_to_mongo_clause(seg))]
+    mixture_mode = keyword_has_mixture_colors(clean_keyword)
+    and_clauses = [
+        clause
+        for seg in segments
+        if (clause := segment_to_mongo_clause(seg, mixture_mode=mixture_mode))
+    ]
     query: dict = {"flags.inStock": True}
     if and_clauses:
         query["$and"] = and_clauses
@@ -548,7 +633,10 @@ def mongo_search_products(
             clean_keyword,
             skip_color_check=breakdown_prefiltered,
         )
-    logger.info(f"[MONGO] {len(candidates)} candidates → {len(results)} matched")
+    logger.info(
+        f"[MONGO] {len(candidates)} candidates → {len(results)} matched "
+        f"(mixture_mode={mixture_mode})"
+    )
     return results, breakdown_prefiltered
 
 
@@ -564,7 +652,26 @@ def dedupe_by_sku(products: list[dict]) -> list[dict]:
     return unique
 
 
-def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[str, set]) -> list[dict]:
+def _filter_by_size_ft(products: list[dict], size_terms: set) -> list[dict]:
+    filtered = []
+    for p in products:
+        for term in size_terms:
+            if any(
+                re.search(size_regex(str(term)), str(p.get(field) or ""), re.IGNORECASE)
+                for field in ("SizeInFT", "SizeInCM")
+            ):
+                filtered.append(p)
+                break
+    return filtered
+
+
+def apply_attribute_post_filters(
+    products: list[dict],
+    attribute_filters: dict[str, set],
+    *,
+    apply_size: bool = True,
+    hard_size: bool = True,
+) -> list[dict]:
     result = products
 
     shape_terms = attribute_filters.get("shape") or set()
@@ -618,23 +725,45 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
         else:
             return []
 
-    size_cm_terms = attribute_filters.get("size_cm") or set()
-    if size_cm_terms:
-        filtered = [
-            p for p in result
-            if any(product_matches_cm_size(p, term) for term in size_cm_terms)
-        ]
-        if filtered:
-            logger.info(
-                f"[SEARCH] cm size filter: {len(result)} → {len(filtered)} "
-                f"(terms={size_cm_terms})"
-            )
-            result = filtered
-        else:
-            return []
+    if apply_size:
+        size_cm_terms = attribute_filters.get("size_cm") or set()
+        if size_cm_terms:
+            filtered = [
+                p for p in result
+                if any(product_matches_cm_size(p, term) for term in size_cm_terms)
+            ]
+            if filtered:
+                logger.info(
+                    f"[SEARCH] cm size filter: {len(result)} → {len(filtered)} "
+                    f"(terms={size_cm_terms})"
+                )
+                result = filtered
+            elif hard_size:
+                logger.info(
+                    f"[SEARCH] cm size filter matched 0 — hard empty (terms={size_cm_terms})"
+                )
+                return []
+
+        size_terms = attribute_filters.get("size") or set()
+        if size_terms:
+            filtered = _filter_by_size_ft(result, size_terms)
+            if filtered:
+                logger.info(
+                    f"[SEARCH] size filter: {len(result)} → {len(filtered)} (terms={size_terms})"
+                )
+                result = filtered
+            elif hard_size:
+                logger.info(
+                    f"[SEARCH] size filter matched 0 — hard empty (terms={size_terms})"
+                )
+                return []
+            else:
+                logger.info(
+                    f"[SEARCH] size filter matched 0 — keeping {len(result)} prior results "
+                    f"(terms={size_terms})"
+                )
 
     for attr, fields in (
-        ("size", ("SizeInFT", "SizeInCM")),
         ("material", ("Material", "MaterialDetails", "MaterialFamilies")),
         ("construction", ("Construction",)),
         ("pattern", ("Pattern", "Style", "StylePattern", "DecoreStyle")),
@@ -647,21 +776,13 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
             matched = False
             for term in terms:
                 term_l = str(term).lower().replace("-", " ")
-                if attr == "size":
-                    if any(
-                        re.search(size_regex(term), str(p.get(field) or ""), re.IGNORECASE)
-                        for field in fields
-                    ):
+                for field in fields:
+                    field_l = str(p.get(field) or "").lower().replace("-", " ")
+                    if term_l and term_l in field_l:
                         matched = True
                         break
-                else:
-                    for field in fields:
-                        field_l = str(p.get(field) or "").lower().replace("-", " ")
-                        if term_l and term_l in field_l:
-                            matched = True
-                            break
-                    if matched:
-                        break
+                if matched:
+                    break
             if matched:
                 filtered.append(p)
         if filtered:
@@ -670,7 +791,6 @@ def apply_attribute_post_filters(products: list[dict], attribute_filters: dict[s
             )
             result = filtered
         else:
-            # Soften: keep prior pool rather than hard-empty when one attribute is too strict
             logger.info(
                 f"[SEARCH] {attr} filter matched 0 — keeping {len(result)} prior results "
                 f"(terms={terms})"
@@ -686,13 +806,26 @@ def apply_search_pipeline(
     price_filter: dict | None,
     exclude_skus: set | None,
     skip_color_post_filter: bool = False,
-) -> tuple[list[dict], str | None]:
+) -> tuple[list[dict], str | None, dict]:
+    """Apply color then attribute filters.
+
+    Returns (products, color_search_tier, meta) where meta may include size_relaxed.
+    """
     unique_results = dedupe_by_sku(raw_results)
     logger.info(f"[SEARCH] after dedup: {len(unique_results)} unique products")
     color_search_tier: str | None = None
+    meta: dict = {"size_relaxed": False}
 
     multicolor_terms = attribute_filters.get("multicolor") or set()
-    exact_color_terms = attribute_filters.get("color_exact") or set()
+    exact_color_terms = set(attribute_filters.get("color_exact") or set())
+    match_terms = set(color_check_terms or set())
+    for term in exact_color_terms:
+        match_terms.update(color_search_terms(term))
+    if not match_terms and exact_color_terms:
+        match_terms = set(exact_color_terms)
+
+    mixture = is_mixture_color_intent(attribute_filters)
+
     if multicolor_terms:
         multicolor_filtered = [p for p in unique_results if product_matches_multicolor(p)]
         if multicolor_filtered:
@@ -701,89 +834,120 @@ def apply_search_pipeline(
                 f"(terms={multicolor_terms})"
             )
             unique_results = multicolor_filtered
+            color_search_tier = "multicolor"
         else:
-            return [], None
+            return [], None, meta
     elif exact_color_terms or color_check_terms:
-        exact_breakdown_colors = user_terms_to_breakdown_colors(exact_color_terms)
-        similar_breakdown_colors = user_terms_to_breakdown_colors(color_check_terms)
-
         if skip_color_post_filter:
-            if exact_breakdown_colors:
-                color_search_tier = "exact_color_breakdown"
-            elif similar_breakdown_colors:
-                color_search_tier = "similar_color_breakdown"
-            else:
-                color_search_tier = "similar_color"
-        else:
+            # Legacy path when Mongo already prefiltered — still label as catalog.
+            color_search_tier = "exact_catalog_color"
+        elif mixture:
+            # Mixture: each exact color must appear via catalog/family or yarn %.
             skus = [
                 str(p.get("SKU") or p.get("BarCode") or "").strip()
                 for p in unique_results
             ]
             breakdown_by_sku = load_breakdowns_for_skus([s for s in skus if s])
-
-            exact_filtered = [
+            required_colors = exact_color_terms or match_terms
+            mixture_filtered = [
                 p for p in unique_results
-                if product_matches_color_breakdown(
-                    p, exact_breakdown_colors, breakdown_by_sku,
+                if product_matches_mixture_colors(
+                    p,
+                    required_colors,
+                    breakdown_by_sku=breakdown_by_sku,
                 )
-            ] if exact_breakdown_colors else []
-
-            if exact_filtered:
+            ]
+            if mixture_filtered:
                 logger.info(
-                    f"[SEARCH] exact color breakdown filter: {len(unique_results)} → "
-                    f"{len(exact_filtered)} (colors={sorted(exact_breakdown_colors)})"
+                    f"[SEARCH] mixture color filter: {len(unique_results)} → "
+                    f"{len(mixture_filtered)} (terms={sorted(required_colors)})"
                 )
-                unique_results = exact_filtered
-                color_search_tier = "exact_color_breakdown"
-            elif similar_breakdown_colors:
-                similar_filtered = [
-                    p for p in unique_results
-                    if product_matches_color_breakdown(
-                        p, similar_breakdown_colors, breakdown_by_sku,
-                    )
-                ]
-                if similar_filtered:
-                    logger.info(
-                        f"[SEARCH] similar color breakdown filter: {len(unique_results)} → "
-                        f"{len(similar_filtered)} (exact_colors={sorted(exact_breakdown_colors)}, "
-                        f"similar_colors={sorted(similar_breakdown_colors)})"
-                    )
-                    unique_results = similar_filtered
-                    color_search_tier = "similar_color_breakdown"
-                else:
-                    similar_filtered = [
-                        p for p in unique_results
-                        if product_matches_color_terms(p, color_check_terms)
-                    ]
-                    if similar_filtered:
-                        logger.info(
-                            f"[SEARCH] GrColor fallback filter: {len(unique_results)} → "
-                            f"{len(similar_filtered)} (terms={color_check_terms})"
-                        )
-                        unique_results = similar_filtered
-                        color_search_tier = "similar_color"
-                    else:
-                        return [], None
-            elif color_check_terms:
-                similar_filtered = [
-                    p for p in unique_results
-                    if product_matches_color_terms(p, color_check_terms)
-                ]
-                if similar_filtered:
-                    logger.info(
-                        f"[SEARCH] GrColor filter: {len(unique_results)} → "
-                        f"{len(similar_filtered)} (terms={color_check_terms})"
-                    )
-                    unique_results = similar_filtered
-                    color_search_tier = "similar_color"
-                else:
-                    return [], None
+                unique_results = mixture_filtered
+                color_search_tier = "mixture_catalog_color"
             else:
-                return [], None
+                return [], None, meta
+        else:
+            # Single-color: catalog labels first, yarn % only as last fallback.
+            catalog_exact = [
+                p for p in unique_results
+                if product_matches_catalog_color(p, match_terms)
+            ]
+            if catalog_exact:
+                logger.info(
+                    f"[SEARCH] exact catalog color filter: {len(unique_results)} → "
+                    f"{len(catalog_exact)} (terms={sorted(match_terms)})"
+                )
+                unique_results = catalog_exact
+                color_search_tier = "exact_catalog_color"
+            else:
+                family_filtered = [
+                    p for p in unique_results
+                    if product_matches_single_color_family(p, match_terms)
+                ]
+                if family_filtered:
+                    logger.info(
+                        f"[SEARCH] similar catalog color (non-mixture ColorFamily) filter: "
+                        f"{len(unique_results)} → {len(family_filtered)} "
+                        f"(terms={sorted(match_terms)})"
+                    )
+                    unique_results = family_filtered
+                    color_search_tier = "similar_catalog_color"
+                else:
+                    skus = [
+                        str(p.get("SKU") or p.get("BarCode") or "").strip()
+                        for p in unique_results
+                    ]
+                    breakdown_by_sku = load_breakdowns_for_skus([s for s in skus if s])
+                    breakdown_colors = user_terms_to_breakdown_colors(
+                        exact_color_terms or match_terms
+                    )
+                    breakdown_filtered = [
+                        p for p in unique_results
+                        if breakdown_colors
+                        and product_matches_color_breakdown(
+                            p, breakdown_colors, breakdown_by_sku,
+                        )
+                    ] if breakdown_colors else []
+                    if breakdown_filtered:
+                        logger.info(
+                            f"[SEARCH] breakdown fallback filter: {len(unique_results)} → "
+                            f"{len(breakdown_filtered)} (colors={sorted(breakdown_colors)})"
+                        )
+                        unique_results = breakdown_filtered
+                        color_search_tier = "breakdown_fallback"
+                    else:
+                        return [], None, meta
 
-    unique_results = apply_attribute_post_filters(unique_results, attribute_filters)
+    # Non-size attrs first (hard size applied next with optional relax).
+    color_pool = unique_results
+    unique_results = apply_attribute_post_filters(
+        color_pool,
+        attribute_filters,
+        apply_size=True,
+        hard_size=True,
+    )
+    size_terms = attribute_filters.get("size") or set()
+    size_cm_terms = attribute_filters.get("size_cm") or set()
+    if (
+        not unique_results
+        and color_pool
+        and (size_terms or size_cm_terms)
+    ):
+        # Soft-fallback: keep color quality, drop exact size requirement.
+        logger.info(
+            "[SEARCH] size hard-empty after color filter — relaxing size "
+            f"(size={sorted(size_terms)} size_cm={sorted(size_cm_terms)})"
+        )
+        unique_results = apply_attribute_post_filters(
+            color_pool,
+            attribute_filters,
+            apply_size=False,
+            hard_size=True,
+        )
+        meta["size_relaxed"] = bool(unique_results)
+
     if not unique_results:
-        return [], None
+        return [], None, meta
 
     if price_filter:
         unique_results = apply_price_filter(unique_results, price_filter)
@@ -794,4 +958,4 @@ def apply_search_pipeline(
             p for p in unique_results
             if str(p.get("SKU", "")).upper() not in upper_exclude
         ]
-    return unique_results, color_search_tier
+    return unique_results, color_search_tier, meta

@@ -22,10 +22,12 @@ from qlink_chatbot.utils.jr_search_keywords import (
 from qlink_chatbot.utils.jr_search_llm_extract import resolve_keyword_with_llm_extraction
 from qlink_chatbot.utils.jr_search_mongo import (
     apply_search_pipeline,
+    filters_without_size,
     get_instock_products,
     mongo_search_cm_products,
     mongo_search_products,
     products_collection,
+    strip_size_segments_from_keyword,
 )
 from qlink_chatbot.utils.jr_search_recommendation import (
     build_product_recommendation_reason,
@@ -179,7 +181,7 @@ async def jaipur_rugs_product_search(
                 f"Construction={_p.get('Construction')!r} Pattern={_p.get('Pattern')!r}"
             )
 
-        unique_results, color_search_tier = await asyncio.to_thread(
+        unique_results, color_search_tier, pipeline_meta = await asyncio.to_thread(
             apply_search_pipeline,
             raw_results,
             color_check_terms=color_check_terms,
@@ -188,12 +190,65 @@ async def jaipur_rugs_product_search(
             exclude_skus=exclude_skus,
             skip_color_post_filter=color_prefiltered,
         )
+        size_relaxed = bool((pipeline_meta or {}).get("size_relaxed"))
+
+        # Prefer catalog-label color at nearby sizes over yarn-% matches at exact size.
+        size_requested = bool(
+            (attribute_filters.get("size") or set())
+            or (attribute_filters.get("size_cm") or set())
+            or (attribute_filters.get("size_category") or set())
+        )
+        weak_or_empty = (
+            not unique_results
+            or color_search_tier in {None, "breakdown_fallback"}
+        )
+        if size_requested and weak_or_empty and clean_keyword:
+            kw_no_size = strip_size_segments_from_keyword(clean_keyword)
+            if kw_no_size and kw_no_size != clean_keyword:
+                logger.info(
+                    f"[SEARCH] re-query without size for catalog color "
+                    f"(was tier={color_search_tier!r}) keyword={kw_no_size!r}"
+                )
+                raw_relaxed, color_pre_relaxed = await asyncio.to_thread(
+                    mongo_search_products,
+                    kw_no_size,
+                )
+                relaxed_filters = filters_without_size(attribute_filters)
+                relaxed_results, relaxed_tier, relaxed_meta = await asyncio.to_thread(
+                    apply_search_pipeline,
+                    raw_relaxed,
+                    color_check_terms=color_check_terms,
+                    attribute_filters=relaxed_filters,
+                    price_filter=price_filter,
+                    exclude_skus=exclude_skus,
+                    skip_color_post_filter=color_pre_relaxed,
+                )
+                prefer_relaxed = (
+                    relaxed_results
+                    and relaxed_tier in {
+                        "exact_catalog_color",
+                        "similar_catalog_color",
+                        "mixture_catalog_color",
+                    }
+                )
+                if prefer_relaxed or (not unique_results and relaxed_results):
+                    unique_results = relaxed_results
+                    color_search_tier = relaxed_tier
+                    size_relaxed = True
+                    logger.info(
+                        f"[SEARCH] using size-relaxed catalog results "
+                        f"tier={color_search_tier!r} n={len(unique_results)}"
+                    )
+
         if not unique_results:
             logger.warning("[SEARCH] 0 products after filters")
             return {"error": "No products found."}
 
         if color_search_tier:
-            logger.info(f"[SEARCH] color match tier: {color_search_tier}")
+            logger.info(
+                f"[SEARCH] color match tier: {color_search_tier}"
+                + (" size_relaxed=true" if size_relaxed else "")
+            )
 
         displayable = [p for p in unique_results if _is_displayable_product(p)]
         if not displayable:
@@ -219,6 +274,8 @@ async def jaipur_rugs_product_search(
             exact_color_terms=attribute_filters.get("color_exact") or set(),
             breakdown_by_sku=breakdown_by_sku,
             color_search_tier=color_search_tier,
+            size_terms=attribute_filters.get("size") or set(),
+            size_relaxed=size_relaxed,
             limit=3,
         )
         logger.info(
@@ -262,6 +319,7 @@ async def jaipur_rugs_product_search(
                 displayable_pool_size=len(displayable),
                 rank=rank_idx,
                 rank_score=rank_score,
+                size_relaxed=size_relaxed,
             )
             recommendation_reasons.append(reason)
             logger.info(
