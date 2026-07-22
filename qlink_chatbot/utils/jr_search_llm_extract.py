@@ -194,20 +194,119 @@ _REFINEMENT_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# Kisna-style: these fields mark a "new category / new shop-by" ask.
+# Price-only follow-ups have none of these → previous filters may be inherited.
+_CATALOG_ATTR_KEYS = (
+    "color",
+    "color_exact",
+    "shape",
+    "size",
+    "size_cm",
+    "size_category",
+    "material",
+    "construction",
+    "pattern",
+    "room",
+    "catalog_tag",
+    "multicolor",
+)
+
+
+def _message_has_catalog_attrs(text: str) -> bool:
+    if not (text or "").strip():
+        return False
+    _pf, _clean, _colors, attrs = normalise_keyword(text)
+    for key in _CATALOG_ATTR_KEYS:
+        val = attrs.get(key)
+        if val in (None, False, "", set(), [], {}):
+            continue
+        return True
+    return False
+
 
 def _should_ignore_previous_search(keyword: str, user_message: str = "") -> bool:
-    """True for fresh mega-menu browses (new arrival / bestsellers / …).
+    """True for a fresh catalog ask (Kisna: new category drops prior filters).
 
-    Prevents previous purple/size/material filters from being AND-merged into
-    a brand-new category ask.
+    Mega-menu tags (bestsellers / outdoor / …) and shop-by attrs (color, size,
+    material, room, …) all count. Price-only refinements do NOT — those inherit.
     """
     text = (user_message or keyword or "").strip()
     if not text:
         return False
     if _REFINEMENT_HINT.search(text):
         return False
-    _pf, _clean, _colors, attrs = normalise_keyword(text)
-    return bool(attrs.get("catalog_tag"))
+    return _message_has_catalog_attrs(text)
+
+
+def tool_keyword_has_context_bleed(model_kw: str, user_message: str) -> bool:
+    """True when the agent tool keyword invents catalog attrs absent from the user ask."""
+    model = (model_kw or "").strip()
+    user = (user_message or "").strip()
+    if not model or not user:
+        return False
+    _pf_m, _c_m, _col_m, model_attrs = normalise_keyword(model)
+    _pf_u, _c_u, _col_u, user_attrs = normalise_keyword(user)
+    for key in _CATALOG_ATTR_KEYS:
+        mval = model_attrs.get(key)
+        uval = user_attrs.get(key)
+        if isinstance(mval, set):
+            extra = mval - (uval or set())
+            if extra:
+                return True
+        elif mval and not uval:
+            return True
+    return False
+
+
+def resolve_hygienic_search_keyword(args: dict | None, user_message: str = "") -> str:
+    """Resolve tool keyword without trusting chat-history bleed from the model.
+
+    Fresh searches (new catalog attrs in the user message) always use the user
+    message. If the model keyword still smuggles prior filters, drop it.
+    """
+    from qlink_chatbot.utils.jr_search_keywords import resolve_search_keyword
+
+    message = (user_message or "").strip()
+    model_only = resolve_search_keyword(args, "")
+
+    if message and _should_ignore_previous_search("", message):
+        if model_only and model_only.lower() != message.lower():
+            logger.info(
+                f"[SEARCH-HYGIENE] fresh search — using user_message={message!r} "
+                f"(ignored model keyword={model_only!r})"
+            )
+        return message
+
+    if model_only and message and tool_keyword_has_context_bleed(model_only, message):
+        logger.info(
+            f"[SEARCH-HYGIENE] context bleed in tool keyword={model_only!r} "
+            f"— using user_message={message!r}"
+        )
+        return message
+
+    return resolve_search_keyword(args, user_message)
+
+
+def resolved_keyword_for_memory(
+    keyword: str,
+    llm_debug: dict | None,
+) -> str:
+    """Persist the post-extract keyword so the next turn does not inherit bleed."""
+    if not llm_debug:
+        return (keyword or "").strip()
+    if llm_debug.get("use_llm_payload") and llm_debug.get("search_payload"):
+        payload = llm_debug["search_payload"]
+        clean = (payload.get("clean_keyword") or "").strip()
+        price_filter = payload.get("price_filter")
+        if price_filter:
+            from qlink_chatbot.utils.jr_search_currency import price_filter_to_keyword
+
+            price_kw = price_filter_to_keyword(price_filter)
+            if clean and price_kw:
+                return f"{clean}&{price_kw}"
+            return (price_kw or clean or keyword or "").strip()
+        return (clean or llm_debug.get("merged_keyword") or keyword or "").strip()
+    return (llm_debug.get("merged_keyword") or keyword or "").strip()
 
 
 def _sanitize_attrs_to_current_message(
@@ -217,7 +316,7 @@ def _sanitize_attrs_to_current_message(
     user_message: str,
 ) -> dict:
     """Drop previous-search / polluted tool-keyword bleed; keep current ask only."""
-    # Prefer the human message — agent tool keyword often reuses a prior tag ("new").
+    # Prefer the human message — agent tool keyword often reuses prior filters.
     current = (user_message or keyword or "").strip()
     clean: dict[str, Any] = {
         "colors": [],
@@ -260,7 +359,7 @@ def _sanitize_attrs_to_current_message(
             clean["price"] = _mongo_filter_to_internal_price(pf)
 
     if notes:
-        logger.info(f"[LLM-EXTRACT] sanitized fresh catalog_tag browse: {notes}")
+        logger.info(f"[LLM-EXTRACT] sanitized fresh search browse: {notes}")
     return clean
 
 
@@ -1209,7 +1308,7 @@ async def resolve_keyword_with_llm_extraction(
             )
         if previous_search_keyword:
             logger.info(
-                f"[LLM-EXTRACT] ignoring previous_search for fresh catalog_tag browse "
+                f"[LLM-EXTRACT] ignoring previous_search for fresh search "
                 f"prev={previous_search_keyword!r}"
             )
 
@@ -1233,7 +1332,7 @@ async def resolve_keyword_with_llm_extraction(
             keyword="",
             user_message=extract_source,
         )
-        dropped = list(dropped) + ["sanitized:fresh_catalog_tag_browse"]
+        dropped = list(dropped) + ["sanitized:fresh_search_browse"]
 
     if not _attrs_have_searchable_content(attrs):
         logger.warning(f"[LLM-EXTRACT] no searchable content after validation dropped={dropped}")

@@ -23,7 +23,12 @@ from qlink_chatbot.utils.jaipur_rugs_api import (
 )
 from qlink_chatbot.utils.jr_search_currency import price_filter_to_keyword
 from qlink_chatbot.utils.jr_search_keywords import normalise_keyword
-from qlink_chatbot.utils.jr_search_llm_extract import serialise_for_json
+from qlink_chatbot.utils.jr_search_llm_extract import (
+    _should_ignore_previous_search,
+    resolve_hygienic_search_keyword,
+    resolved_keyword_for_memory,
+    serialise_for_json,
+)
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.product_format import format_product_search_message
 from qlink_chatbot.utils.store_locations import JAIPUR_RUGS_STORE_LOCATIONS, search_store_locations
@@ -69,7 +74,7 @@ tools = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Search keyword for Jaipur Rugs catalog. Use '&' to AND attributes. Supported: color, shape, size (8x10), material, construction, style/pattern, room, price, AND mega-menu tags: 'new arrival' / 'bestsellers' / 'outdoor' / 'antique' / 'rug swatch'. Examples: 'new arrival', 'bestsellers', 'outdoor', 'beige', 'blue&round', 'red&8x10', 'wool&hand knotted'. For a fresh category ask (new arrivals/bestsellers), pass ONLY that tag — do not reuse previous search colors/sizes."
+                    "description": "Search keyword built ONLY from the CURRENT user message. Use '&' to AND attributes. Supported: color, shape, size (8x10), material, construction, style/pattern, room, price, AND mega-menu tags: 'new arrival' / 'bestsellers' / 'outdoor' / 'antique' / 'rug swatch'. Examples: 'bestsellers', 'outdoor&under INR 30000', 'beige', 'blue&round', 'red&8x10'. NEVER copy colors/sizes/materials/rooms from earlier turns unless the user restates them or clearly refines ('same but cheaper', 'also in wool')."
                 },
                 "currency": {
                     "type": "string",
@@ -196,39 +201,42 @@ def _merge_search_with_previous(
     user_message: str,
     previous_searches,
 ) -> str:
-    """Combine a price-only refinement with the previous catalog search keyword."""
+    """Combine a price-only refinement with the previous catalog search keyword.
+
+    Catalog attrs are read from the *user message only* (Kisna-style). Never treat
+    a polluted agent tool keyword as evidence of a new shop-by ask.
+    """
     last_keyword = _latest_search_keyword(previous_searches)
     if not last_keyword:
         return keyword or user_message
 
-    for source in (keyword, user_message):
-        text = (source or "").strip()
-        if not text:
-            continue
-        price_filter, clean_keyword, _, attribute_filters = normalise_keyword(text)
-        if not price_filter:
-            continue
+    text = (user_message or "").strip()
+    if not text:
+        return keyword or user_message
 
-        catalog_attrs = (
-            "color", "color_exact", "shape", "size", "size_cm", "size_category",
-            "material", "construction", "pattern", "room", "multicolor",
+    price_filter, _clean_keyword, _, attribute_filters = normalise_keyword(text)
+    if not price_filter:
+        return keyword or user_message
+
+    catalog_attrs = (
+        "color", "color_exact", "shape", "size", "size_cm", "size_category",
+        "material", "construction", "pattern", "room", "catalog_tag", "multicolor",
+    )
+    has_new_catalog_attrs = any(attribute_filters.get(key) for key in catalog_attrs)
+    if has_new_catalog_attrs:
+        # Fresh shop-by / mega-menu ask — do not glue previous filters.
+        return user_message
+
+    _, last_clean, _, _ = normalise_keyword(last_keyword)
+    price_keyword = price_filter_to_keyword(price_filter)
+    if last_clean:
+        merged = f"{last_clean}&{price_keyword}"
+        logger.info(
+            f"[AGENT-GUARD] merged price refinement keyword={merged!r} "
+            f"from last={last_keyword!r}"
         )
-        has_new_catalog_attrs = any(attribute_filters.get(key) for key in catalog_attrs)
-        if has_new_catalog_attrs:
-            return keyword or user_message
-
-        _, last_clean, _, _ = normalise_keyword(last_keyword)
-        price_keyword = price_filter_to_keyword(price_filter)
-        if last_clean:
-            merged = f"{last_clean}&{price_keyword}"
-            logger.info(
-                f"[AGENT-GUARD] merged price refinement keyword={merged!r} "
-                f"from last={last_keyword!r}"
-            )
-            return merged
-        return price_keyword
-
-    return keyword or user_message
+        return merged
+    return price_keyword
 
 
 def _is_price_refinement_followup(user_message: str, previous_searches) -> bool:
@@ -999,7 +1007,9 @@ async def chat_agent(
                 "role": "developer",
                 "content": (
                     "This is a NEW product search request. You MUST call "
-                    "jaipur_rugs_product_search with an appropriate keyword. "
+                    "jaipur_rugs_product_search. Build keyword ONLY from this user message "
+                    f"({user_message!r}) — do NOT reuse colors, sizes, materials, rooms, "
+                    "or tags from previous searches or shown products. "
                     "Do NOT answer from previously shown products or guess availability."
                 ),
             })
@@ -1065,12 +1075,15 @@ async def chat_agent(
                 logger.info(f"[AGENT-TOOL] session={session_id} tool={item.name} args={args}")
 
                 if item.name == "jaipur_rugs_product_search":
-                    keyword = resolve_search_keyword(args, user_message)
-                    keyword = _merge_search_with_previous(
-                        keyword,
-                        user_message,
-                        previous_searches,
-                    )
+                    model_keyword = resolve_search_keyword(args, "")
+                    keyword = resolve_hygienic_search_keyword(args, user_message)
+                    ignore_previous = _should_ignore_previous_search(keyword, user_message)
+                    if not ignore_previous:
+                        keyword = _merge_search_with_previous(
+                            keyword,
+                            user_message,
+                            previous_searches,
+                        )
                     exclude_skus = None
                     skip_llm_extraction = False
                     if _is_product_show_more_followup(user_message, chat_history, previous_searches):
@@ -1082,7 +1095,7 @@ async def chat_agent(
                         ):
                             keyword = last_keyword
                             skip_llm_extraction = True
-                    keyword_sent_to_api = normalise_search_keyword(keyword)
+                            ignore_previous = False
                     if not keyword:
                         logger.warning(
                             f"[AGENT-TOOL] jaipur_rugs_product_search missing keyword "
@@ -1096,35 +1109,57 @@ async def chat_agent(
                         requested_currency=args.get("currency") or detected_currency,
                         exclude_skus=exclude_skus,
                         user_message=user_message,
-                        previous_search_keyword=_latest_search_keyword(previous_searches),
-                        chat_context=format_recent_chat_for_ai(chat_history, limit=4),
+                        previous_search_keyword=(
+                            "" if ignore_previous else _latest_search_keyword(previous_searches)
+                        ),
+                        chat_context=(
+                            ""
+                            if ignore_previous
+                            else format_recent_chat_for_ai(chat_history, limit=4)
+                        ),
                         skip_llm_extraction=skip_llm_extraction,
                         extraction_debug_out=llm_extract_debug,
+                    )
+                    memory_keyword = resolved_keyword_for_memory(
+                        keyword,
+                        llm_extract_debug[0] if llm_extract_debug else None,
+                    )
+                    keyword_sent_to_api = (
+                        normalise_search_keyword(memory_keyword)
+                        or memory_keyword
+                        or normalise_search_keyword(keyword)
                     )
                     product_count = len(products) if isinstance(products, list) else 0
                     logger.info(
                         f"[AGENT-TOOL] jaipur_rugs_product_search "
-                        f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r} "
-                        f"→ {product_count} product(s)"
+                        f"model_kw={model_keyword!r} keyword={keyword!r} "
+                        f"memory_kw={memory_keyword!r} api_keyword={keyword_sent_to_api!r} "
+                        f"ignore_previous={ignore_previous} → {product_count} product(s)"
                     )
                     save_previous_search(
                         session_id,
-                        keyword,
+                        memory_keyword or keyword,
                         products,
                         collection_name=collection_name,
                     )
                     if debug_collector is not None:
                         debug_collector.append(
                             _product_search_tool_debug(
-                                keyword=keyword,
+                                keyword=memory_keyword or keyword,
                                 keyword_sent_to_api=keyword_sent_to_api,
                                 currency=args.get("currency", ""),
                                 products=products,
                                 llm_extract_debug=llm_extract_debug,
+                                extra={
+                                    "keyword_raw_from_model": model_keyword,
+                                    "ignored_previous_search": ignore_previous,
+                                },
                             )
                         )
                     last_product_search_result = products
-                    last_product_search_keyword = keyword_sent_to_api or keyword or user_message
+                    last_product_search_keyword = (
+                        keyword_sent_to_api or memory_keyword or keyword or user_message
+                    )
                     output = json.dumps(products)
 
                 elif item.name == "save_user_name":
@@ -1205,9 +1240,7 @@ async def chat_agent(
             or _is_price_refinement_followup(user_message, previous_searches)
         )
         ):
-            from qlink_chatbot.utils.jr_search_llm_extract import _should_ignore_previous_search
-
-            keyword = resolve_search_keyword({}, user_message)
+            keyword = resolve_hygienic_search_keyword({}, user_message)
             ignore_previous = _should_ignore_previous_search(keyword, user_message)
             if not ignore_previous:
                 keyword = _merge_search_with_previous(
@@ -1215,11 +1248,9 @@ async def chat_agent(
                     user_message,
                     previous_searches,
                 )
-            keyword_sent_to_api = normalise_search_keyword(keyword)
             logger.info(
                 f"[AGENT-FORCE-SEARCH] session={session_id} "
-                f"keyword={keyword!r} api_keyword={keyword_sent_to_api!r} "
-                f"ignore_previous={ignore_previous}"
+                f"keyword={keyword!r} ignore_previous={ignore_previous}"
             )
             llm_extract_debug: list = []
             products = await jaipur_rugs_product_search(
@@ -1236,17 +1267,26 @@ async def chat_agent(
                 ),
                 extraction_debug_out=llm_extract_debug,
             )
+            memory_keyword = resolved_keyword_for_memory(
+                keyword,
+                llm_extract_debug[0] if llm_extract_debug else None,
+            )
+            keyword_sent_to_api = (
+                normalise_search_keyword(memory_keyword)
+                or memory_keyword
+                or normalise_search_keyword(keyword)
+            )
             product_count = len(products) if isinstance(products, list) else 0
             save_previous_search(
                 session_id,
-                keyword,
+                memory_keyword or keyword,
                 products,
                 collection_name=collection_name,
             )
             if debug_collector is not None:
                 debug_collector.append(
                     _product_search_tool_debug(
-                        keyword=keyword,
+                        keyword=memory_keyword or keyword,
                         keyword_sent_to_api=keyword_sent_to_api,
                         currency=detected_currency,
                         products=products,

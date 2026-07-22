@@ -23,6 +23,8 @@ from qlink_chatbot.utils.jr_search_llm_extract import (
     _sanitize_attrs_to_current_message,
     _should_ignore_previous_search,
     build_search_payload_from_attrs,
+    resolve_hygienic_search_keyword,
+    tool_keyword_has_context_bleed,
 )
 from qlink_chatbot.utils.jr_search_sizes import (
     product_matches_size_category,
@@ -151,6 +153,12 @@ def test_shop_by_combo_extract():
 def test_fresh_new_arrival_ignores_previous_search():
     assert _should_ignore_previous_search("new arrival", "new arrival rugs") is True
     assert _should_ignore_previous_search("bestsellers", "bestsellers") is True
+    assert _should_ignore_previous_search("", "outdoor rugs under 30k INR") is True
+    assert _should_ignore_previous_search("", "bestsellers under 1 lakh") is True
+    # Fresh shop-by (Kisna new-category) also drops previous.
+    assert _should_ignore_previous_search("", "blue 8x10 wool") is True
+    # Price-only refinement inherits previous.
+    assert _should_ignore_previous_search("", "under 30k INR") is False
     # Refinement language keeps previous context.
     assert _should_ignore_previous_search(
         "blue", "same but in blue"
@@ -163,6 +171,40 @@ def test_agent_detects_new_arrival_as_product_search():
     assert _is_new_product_search_request("new arrival rugs", [], []) is True
     assert _is_new_product_search_request("bestsellers", [], []) is True
     assert _is_new_product_search_request("outdoor rugs", [], []) is True
+
+
+def test_hygienic_keyword_drops_prior_purple_bleed():
+    polluted = "purple&8x10&wool&living room&under INR 100000"
+    user = "bestsellers under 1 lakh"
+    assert tool_keyword_has_context_bleed(polluted, user) is True
+    assert resolve_hygienic_search_keyword({"keyword": polluted}, user) == user
+
+    outdoor_user = "outdoor rugs under 30k INR"
+    outdoor_polluted = "purple&8x10&wool&living room&under INR 30000"
+    assert resolve_hygienic_search_keyword(
+        {"keyword": outdoor_polluted}, outdoor_user
+    ) == outdoor_user
+
+
+def test_merge_price_only_uses_user_message_not_polluted_tool_kw():
+    from qlink_chatbot.agent.chat_agent import _merge_search_with_previous
+
+    previous = [{"keyword": "purple&8x10&wool&living room"}]
+    # Polluted tool kw has catalog attrs + price, but user only asked price.
+    merged = _merge_search_with_previous(
+        "purple&8x10&wool&living room&under INR 30000",
+        "under 30k INR",
+        previous,
+    )
+    assert "purple" in merged
+    assert "under" in merged.lower() or "INR" in merged
+    # Fresh mega-menu ask must not glue previous purple filters.
+    fresh = _merge_search_with_previous(
+        "purple&8x10&wool&living room&under INR 100000",
+        "bestsellers under 1 lakh",
+        previous,
+    )
+    assert fresh == "bestsellers under 1 lakh"
 
 
 def test_sanitize_strips_previous_bleed_from_new_arrival():
