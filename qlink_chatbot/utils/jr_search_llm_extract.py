@@ -216,7 +216,9 @@ def _sanitize_attrs_to_current_message(
     keyword: str,
     user_message: str,
 ) -> dict:
-    """Drop previous-search bleed; keep only attrs evidenced in the current ask."""
+    """Drop previous-search / polluted tool-keyword bleed; keep current ask only."""
+    # Prefer the human message — agent tool keyword often reuses a prior tag ("new").
+    current = (user_message or keyword or "").strip()
     clean: dict[str, Any] = {
         "colors": [],
         "shapes": [],
@@ -227,23 +229,36 @@ def _sanitize_attrs_to_current_message(
         "constructions": [],
         "patterns": [],
         "rooms": [],
-        "catalog_tags": list(attrs.get("catalog_tags") or []),
+        "catalog_tags": [],
         "multicolor": False,
         "weight_max_kg": None,
         "price": None,
-        "sku": attrs.get("sku"),
-        "collection": attrs.get("collection"),
+        "sku": None,
+        "collection": None,
         "refinement": "new",
     }
     clean, notes = backfill_attrs_from_regex(
         clean,
-        keyword=keyword,
-        user_message=user_message,
+        keyword="",
+        user_message=current,
     )
-    # Preserve LLM catalog_tags if backfill missed a phrase variant.
+    # Keep LLM catalog_tags only if they appear in the current user ask.
+    _pf, _clean, _colors, current_attrs = normalise_keyword(current)
+    allowed_tags = set(current_attrs.get("catalog_tag") or set())
     for tag in attrs.get("catalog_tags") or []:
-        if tag not in clean["catalog_tags"]:
+        if tag in allowed_tags and tag not in clean["catalog_tags"]:
             clean["catalog_tags"].append(tag)
+    if not clean["catalog_tags"] and allowed_tags:
+        clean["catalog_tags"] = sorted(allowed_tags)
+
+    # Preserve price when the current message has budget intent.
+    if attrs.get("price") and _source_has_price_intent(current):
+        clean["price"] = attrs["price"]
+    elif _source_has_price_intent(current):
+        pf, _residual = extract_price_filter_from_text(current.lower())
+        if pf:
+            clean["price"] = _mongo_filter_to_internal_price(pf)
+
     if notes:
         logger.info(f"[LLM-EXTRACT] sanitized fresh catalog_tag browse: {notes}")
     return clean
@@ -1174,19 +1189,37 @@ async def resolve_keyword_with_llm_extraction(
         logger.info(f"[LLM-EXTRACT] skip mode={mode} reason={reason} keyword={kw!r}")
         return kw, {"ran": False, "mode": mode, "reason": reason}
 
-    ignore_previous = _should_ignore_previous_search(kw, user_message or source)
+    # Detect from the human message first — tool keyword may still say "new&…"
+    ignore_previous = _should_ignore_previous_search(
+        "",
+        user_message or source,
+    ) or _should_ignore_previous_search(kw, user_message or source)
     prev_for_llm = "" if ignore_previous else previous_search_keyword
     context_for_llm = "" if ignore_previous else chat_context
-    if ignore_previous and previous_search_keyword:
-        logger.info(
-            f"[LLM-EXTRACT] ignoring previous_search for fresh catalog_tag browse "
-            f"prev={previous_search_keyword!r}"
-        )
+    extract_kw = kw
+    extract_source = source
+    if ignore_previous:
+        # Drop polluted agent tool keyword (e.g. prior "new" + price).
+        extract_source = (user_message or source or kw).strip()
+        extract_kw = extract_source
+        if kw and kw.lower() != extract_kw.lower():
+            logger.info(
+                f"[LLM-EXTRACT] replacing polluted tool keyword={kw!r} "
+                f"with user_message={extract_kw!r}"
+            )
+        if previous_search_keyword:
+            logger.info(
+                f"[LLM-EXTRACT] ignoring previous_search for fresh catalog_tag browse "
+                f"prev={previous_search_keyword!r}"
+            )
 
-    logger.info(f"[LLM-EXTRACT] run mode={mode} reason={reason} keyword_in={kw!r} source={source!r}")
+    logger.info(
+        f"[LLM-EXTRACT] run mode={mode} reason={reason} "
+        f"keyword_in={extract_kw!r} source={extract_source!r}"
+    )
     attrs, dropped = await extract_search_attributes(
-        source,
-        keyword=kw,
+        extract_source,
+        keyword=extract_kw if extract_kw.lower() != extract_source.lower() else "",
         previous_search_keyword=prev_for_llm,
         chat_context=context_for_llm,
         detected_currency=detected_currency,
@@ -1197,8 +1230,8 @@ async def resolve_keyword_with_llm_extraction(
     if ignore_previous:
         attrs = _sanitize_attrs_to_current_message(
             attrs,
-            keyword=kw,
-            user_message=source,
+            keyword="",
+            user_message=extract_source,
         )
         dropped = list(dropped) + ["sanitized:fresh_catalog_tag_browse"]
 

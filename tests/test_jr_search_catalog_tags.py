@@ -199,3 +199,41 @@ def test_sanitize_strips_previous_bleed_from_new_arrival():
     assert payload["clean_keyword"] == "new"
     assert payload["attribute_filters"]["catalog_tag"] == {"new"}
     assert not payload["attribute_filters"].get("color_exact")
+
+
+def test_sanitize_drops_polluted_new_from_bestsellers_ask():
+    """Agent tool keyword 'new&under INR…' must not stick when user asked bestsellers."""
+    polluted = {
+        "colors": [],
+        "shapes": [],
+        "sizes_ft": [],
+        "sizes_cm": [],
+        "size_categories": [],
+        "materials": [],
+        "constructions": [],
+        "patterns": [],
+        "rooms": [],
+        "catalog_tags": ["new", "bestseller"],
+        "multicolor": False,
+        "weight_max_kg": None,
+        "price": {
+            "currency": "INR",
+            "operator": "lte",
+            "amount": 100000,
+        },
+        "sku": None,
+        "collection": None,
+        "refinement": "new",
+    }
+    clean = _sanitize_attrs_to_current_message(
+        polluted,
+        keyword="new&under INR 100000",
+        user_message="bestsellers under 1 lakh",
+    )
+    assert clean["catalog_tags"] == ["bestseller"]
+    assert "new" not in clean["catalog_tags"]
+    assert clean["price"] is not None
+    assert clean["price"]["amount"] == 100000
+    payload = build_search_payload_from_attrs(clean)
+    assert payload["clean_keyword"] == "bestseller"
+    assert payload["price_filter"]["amount"] == 100000
