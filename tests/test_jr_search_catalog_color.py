@@ -202,4 +202,88 @@ def test_compute_score_sole_dominant():
         },
     )
     assert score["sole_dominant"] is True
+    assert score["closeness_band"] == 3
     assert score["catalog_score"] >= 1
+
+
+def test_accent_purple_not_sole_dominant():
+    """Grey-led rug with purple accent must NOT rank as dominant."""
+    product = _rug(SKU="ACCENT", GrColor="Purple Mist")
+    score = compute_color_match_score(
+        product,
+        match_terms=set(color_search_terms("purple")),
+        exact_color_terms={"purple"},
+        breakdown_by_sku={
+            "ACCENT": [
+                {"color": "Grey", "percentage": 65.0},
+                {"color": "Purple", "percentage": 35.0},
+            ]
+        },
+    )
+    assert score["sole_dominant"] is False
+    assert score["closeness_band"] == 2  # secondary (35%)
+    assert score["requested_pct"] == 35.0
+
+
+def test_nearest_first_dominant_beats_accent_same_label():
+    """For any color: yarn-dominant nearest match beats accent with same GrColor word."""
+    dominant = _rug(SKU="DOM", GrColor="Ocean Blue")
+    accent = _rug(SKU="ACC", GrColor="Blue Mist")
+    breakdown = {
+        "DOM": [
+            {"color": "Blue", "percentage": 75.0},
+            {"color": "White", "percentage": 25.0},
+        ],
+        "ACC": [
+            {"color": "Grey", "percentage": 80.0},
+            {"color": "Blue", "percentage": 20.0},
+        ],
+    }
+    terms = set(color_search_terms("blue"))
+    selected, scores = select_top_products(
+        [accent, dominant],
+        match_terms=terms,
+        exact_color_terms={"blue"},
+        breakdown_by_sku=breakdown,
+        color_search_tier="exact_catalog_color",
+        limit=2,
+    )
+    assert selected[0]["SKU"] == "DOM"
+    assert scores[0]["closeness_band"] > scores[1]["closeness_band"]
+
+
+def test_nearest_first_labeled_beats_unlabeled_accent():
+    """Named color on GrColor beats unlabeled high accent yarn %."""
+    labeled = _rug(SKU="LAB", GrColor="Crimson Red")
+    yarn_only = _rug(SKU="YARN", GrColor="Sand")
+    breakdown = {
+        "LAB": [{"color": "Red", "percentage": 55.0}, {"color": "Brown", "percentage": 45.0}],
+        "YARN": [{"color": "Red", "percentage": 90.0}, {"color": "White", "percentage": 10.0}],
+    }
+    # yarn_only has no catalog red label → catalog_score 0 even with high red %
+    selected, scores = select_top_products(
+        [yarn_only, labeled],
+        match_terms=set(color_search_terms("red")),
+        exact_color_terms={"red"},
+        breakdown_by_sku=breakdown,
+        color_search_tier="exact_catalog_color",
+        limit=2,
+    )
+    assert selected[0]["SKU"] == "LAB"
+    assert scores[0]["catalog_score"] >= scores[1]["catalog_score"]
+
+
+def test_border_only_demoted_vs_ground_color():
+    ground = _rug(SKU="GND", GrColor="Emerald", BrColor="Ivory")
+    border = _rug(SKU="BRD", GrColor="Ivory", BrColor="Emerald Green")
+    terms = set(color_search_terms("green"))
+    selected, scores = select_top_products(
+        [border, ground],
+        match_terms=terms,
+        exact_color_terms={"green"},
+        breakdown_by_sku={},
+        color_search_tier="exact_catalog_color",
+        limit=2,
+    )
+    assert selected[0]["SKU"] == "GND"
+    assert scores[1].get("border_only") is True or scores[0]["sort_key"] > scores[1]["sort_key"]

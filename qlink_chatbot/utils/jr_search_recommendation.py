@@ -1,4 +1,4 @@
-"""Explain why a product was included in search results."""
+"""Explain why a product was included in search results + nearest-first color rank."""
 
 from qlink_chatbot.utils.jr_search_aliases import color_search_terms
 from qlink_chatbot.utils.jr_search_color_breakdown import (
@@ -26,12 +26,92 @@ COLOR_TIER_METHOD = {
     "similar_color": "grcolor_colorfamily",
 }
 
+# Yarn closeness bands (higher = nearer to the user's color ask).
+# Applies to every palette color (purple, blue, red, …) — not purple-only.
+CLOSENESS_DOMINANT = 3   # requested color leads the rug
+CLOSENESS_SECONDARY = 2  # meaningful share / trusted catalog label
+CLOSENESS_ACCENT = 1     # present but not what the rug is "about"
+CLOSENESS_UNKNOWN = 0
+
+DOMINANT_PCT_MIN = 50.0
+SECONDARY_PCT_MIN = 25.0
+
+
+def _full_yarn_by_color(
+    product: dict,
+    breakdown_by_sku: dict[str, list[dict]] | None,
+) -> dict[str, float]:
+    """All yarn colors for the SKU (not filtered to the requested palette)."""
+    sku = str(product.get("SKU") or product.get("BarCode") or "").strip()
+    rows = (breakdown_by_sku or {}).get(sku) if sku else None
+    if not rows:
+        return {}
+    full: dict[str, float] = {}
+    for row in rows:
+        color = str(row.get("color") or "").strip()
+        if not color:
+            continue
+        full[color] = round(full.get(color, 0.0) + float(row.get("percentage") or 0), 2)
+    return full
+
+
+def _requested_yarn_pct(
+    full_by_color: dict[str, float],
+    exact_color_terms: set[str],
+) -> float:
+    palette = user_terms_to_breakdown_colors(set(exact_color_terms or set()))
+    if not palette or not full_by_color:
+        return 0.0
+    return round(sum(float(full_by_color.get(c) or 0) for c in palette), 2)
+
+
+def _sole_dominant_in_full_yarn(
+    full_by_color: dict[str, float],
+    exact_color_terms: set[str],
+) -> bool:
+    """True when a requested palette color is the unique max % among ALL yarns.
+
+    Critical: must use the full breakdown. Filtering to purple-only first made
+    every Purple:15% rug look "sole dominant".
+    """
+    if not full_by_color:
+        return False
+    palette = user_terms_to_breakdown_colors(set(exact_color_terms or set()))
+    if not palette:
+        return False
+    mx = max(full_by_color.values())
+    if mx <= 0:
+        return False
+    max_colors = {c for c, p in full_by_color.items() if p == mx}
+    return len(max_colors) == 1 and bool(max_colors & palette)
+
+
+def _closeness_band(
+    *,
+    requested_pct: float,
+    sole_dominant: bool,
+    catalog_score: int,
+) -> int:
+    """How near is this rug to the user's color ask (all colors)."""
+    if sole_dominant or requested_pct >= DOMINANT_PCT_MIN:
+        return CLOSENESS_DOMINANT
+    if requested_pct >= SECONDARY_PCT_MIN:
+        return CLOSENESS_SECONDARY
+    if requested_pct > 0:
+        return CLOSENESS_ACCENT
+    # No yarn rows: trust catalog labels as "near" so named colors still beat accents.
+    if catalog_score >= 2:
+        return CLOSENESS_DOMINANT
+    if catalog_score >= 1:
+        return CLOSENESS_SECONDARY
+    return CLOSENESS_UNKNOWN
+
 
 def _sole_dominant_requested(
     by_color: dict,
     exact_color_terms: set[str],
 ) -> bool:
-    """True when a requested palette color is the sole max % in matched breakdown."""
+    """Legacy helper — prefer _sole_dominant_in_full_yarn for ranking."""
     if not by_color:
         return False
     palette = user_terms_to_breakdown_colors(set(exact_color_terms or set()))
@@ -64,12 +144,14 @@ def compute_color_match_score(
     size_relaxed: bool = False,
 ) -> dict:
     """
-    Rank key (highest first):
-    1) catalog GrColor / DisplayFilter hit (exact user word > alias)
-    2) sole-dominant requested yarn color
-    3) matched JR.product_color % (sum, then max)
-    4) ColorFamily hit (weaker)
-    5) exact size hit (when size was requested / relaxed)
+    Nearest-first rank key (highest first) — same ladder for every color:
+
+    1) catalog GrColor exact user word > alias/DisplayFilter
+    2) yarn closeness (dominant > secondary > accent > unknown)
+    3) sole-dominant among ALL yarn colors
+    4) requested yarn %
+    5) prefer ground label over border-only
+    6) exact size when size was requested / relaxed
     """
     terms = set(match_terms or set())
     for term in exact_color_terms or set():
@@ -77,6 +159,12 @@ def compute_color_match_score(
 
     breakdown = matched_breakdown_for_terms(product, terms, breakdown_by_sku)
     by_color = breakdown.get("by_color") or {}
+    full_by_color = _full_yarn_by_color(product, breakdown_by_sku)
+    requested_pct = _requested_yarn_pct(full_by_color, exact_color_terms or set())
+    if requested_pct <= 0 and by_color:
+        # Fallback when exact_color_terms empty but match_terms mapped.
+        requested_pct = round(sum(by_color.values()), 2)
+
     pct_sum = round(sum(by_color.values()), 2)
     pct_max = round(max(by_color.values()), 2) if by_color else 0.0
 
@@ -89,9 +177,23 @@ def compute_color_match_score(
     catalog_primary = product_matches_catalog_color(product, terms) if terms else False
     # 2 = exact user color on GrColor, 1 = alias/DisplayFilter catalog hit, 0 = none
     catalog_score = 2 if exact_user_grcolor else (1 if catalog_primary else 0)
-    sole_dom = _sole_dominant_requested(by_color, exact_color_terms or set())
+
+    sole_dom = _sole_dominant_in_full_yarn(full_by_color, exact_color_terms or set())
+    closeness = _closeness_band(
+        requested_pct=requested_pct,
+        sole_dominant=sole_dom,
+        catalog_score=catalog_score,
+    )
+
+    grcolor_hit = bool(catalog_hits.get("GrColor"))
+    display_hit = bool(catalog_hits.get("DisplayFilter"))
+    brcolor_hit = bool(catalog_hits.get("BrColor"))
+    border_only = brcolor_hit and not grcolor_hit and not display_hit
+    # Prefer ground/display labels; demote border-only matches.
+    ground_prefer = 1 if (grcolor_hit or display_hit) else 0
+    border_penalty = 0 if border_only else 1
+
     exact_size = _product_matches_size_terms(product, size_terms or set())
-    # When size was relaxed, prefer still-exact sizes; when not relaxed, all already match.
     size_score = 1 if exact_size else 0
     if not size_terms:
         size_score = 0
@@ -99,25 +201,29 @@ def compute_color_match_score(
     return {
         "pct_sum": pct_sum,
         "pct_max": pct_max,
+        "requested_pct": requested_pct,
+        "closeness_band": closeness,
         "exact_grcolor": exact_user_grcolor,
         "catalog_primary": catalog_primary,
         "catalog_score": catalog_score,
         "sole_dominant": sole_dom,
-        "grcolor_hit": bool(catalog_hits.get("GrColor")),
-        "displayfilter_hit": bool(catalog_hits.get("DisplayFilter")),
+        "grcolor_hit": grcolor_hit,
+        "displayfilter_hit": display_hit,
         "colorfamily_hit": bool(catalog_hits.get("ColorFamily")),
-        "brcolor_hit": bool(catalog_hits.get("BrColor")),
+        "brcolor_hit": brcolor_hit,
+        "border_only": border_only,
         "exact_size": exact_size,
         "size_relaxed": size_relaxed,
         "breakdown_matched": by_color,
+        "full_yarn": full_by_color,
         "sort_key": (
             catalog_score,
+            closeness,
             1 if sole_dom else 0,
-            pct_sum,
-            pct_max,
-            int(catalog_hits.get("ColorFamily", False)),
+            requested_pct,
+            ground_prefer,
+            border_penalty,
             size_score,
-            int(catalog_hits.get("BrColor", False)),
         ),
     }
 
@@ -132,7 +238,7 @@ def rank_products_by_color_match(
     size_terms: set[str] | None = None,
     size_relaxed: bool = False,
 ) -> list[tuple[dict, dict]]:
-    """Return products sorted best color match first (stable for ties)."""
+    """Return products sorted nearest color match first (stable for ties)."""
     if not products:
         return []
 
@@ -175,7 +281,7 @@ def select_top_products(
     size_relaxed: bool = False,
     limit: int = 3,
 ) -> tuple[list[dict], list[dict]]:
-    """Pick top N products by color relevance instead of random sampling."""
+    """Pick top N products by nearest color relevance instead of random sampling."""
     ranked = rank_products_by_color_match(
         products,
         match_terms=match_terms,
@@ -344,8 +450,19 @@ def build_product_recommendation_reason(
         rank_detail_parts: list[str] = []
         if rank_score.get("catalog_score"):
             rank_detail_parts.append(f"catalog_score={rank_score.get('catalog_score')}")
+        closeness = rank_score.get("closeness_band")
+        if closeness is not None:
+            band_name = {
+                CLOSENESS_DOMINANT: "dominant",
+                CLOSENESS_SECONDARY: "secondary",
+                CLOSENESS_ACCENT: "accent",
+                CLOSENESS_UNKNOWN: "unknown",
+            }.get(closeness, str(closeness))
+            rank_detail_parts.append(f"closeness={band_name}")
         if rank_score.get("sole_dominant"):
             rank_detail_parts.append("sole-dominant yarn color")
+        if rank_score.get("requested_pct"):
+            rank_detail_parts.append(f"requested_yarn={rank_score.get('requested_pct'):g}%")
         if pct_bits:
             rank_detail_parts.append(
                 "breakdown "
@@ -360,11 +477,13 @@ def build_product_recommendation_reason(
             rank_detail_parts.append("DisplayFilter match")
         if rank_score.get("colorfamily_hit"):
             rank_detail_parts.append("ColorFamily match")
+        if rank_score.get("border_only"):
+            rank_detail_parts.append("border-only (demoted)")
         if rank_score.get("exact_size"):
             rank_detail_parts.append("exact size")
         detail = f" ({'; '.join(rank_detail_parts)})" if rank_detail_parts else ""
         summary_parts.append(
-            f"Ranked #{rank or '?'} of {displayable_pool_size} by color relevance{detail}"
+            f"Ranked #{rank or '?'} of {displayable_pool_size} by nearest color{detail}"
         )
     else:
         summary_parts.append(
