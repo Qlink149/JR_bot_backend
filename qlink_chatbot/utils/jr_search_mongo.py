@@ -829,8 +829,17 @@ def apply_attribute_post_filters(
                 f"(terms={size_category_terms})"
             )
             result = filtered
-        else:
+        elif hard_size:
+            logger.info(
+                f"[SEARCH] size_category filter matched 0 — hard empty "
+                f"(terms={size_category_terms})"
+            )
             return []
+        else:
+            logger.info(
+                f"[SEARCH] size_category filter matched 0 — keeping {len(result)} prior "
+                f"(terms={size_category_terms})"
+            )
 
     if apply_size:
         size_cm_terms = attribute_filters.get("size_cm") or set()
@@ -898,10 +907,12 @@ def apply_attribute_post_filters(
             )
             result = filtered
         else:
+            # Kisna-style: hard-miss so progressive relax can drop honestly —
+            # never soft-keep and claim the attribute matched.
             logger.info(
-                f"[SEARCH] {attr} filter matched 0 — keeping {len(result)} prior results "
-                f"(terms={terms})"
+                f"[SEARCH] {attr} filter matched 0 — hard empty (terms={terms})"
             )
+            return []
     return result
 
 
@@ -1035,20 +1046,22 @@ def apply_search_pipeline(
     )
     size_terms = attribute_filters.get("size") or set()
     size_cm_terms = attribute_filters.get("size_cm") or set()
+    size_category_terms = attribute_filters.get("size_category") or set()
     if (
         not unique_results
         and color_pool
-        and (size_terms or size_cm_terms)
+        and (size_terms or size_cm_terms or size_category_terms)
     ):
-        # Soft-fallback: keep color quality, drop exact size requirement.
+        # Soft-fallback: keep color quality, drop exact size / size-bucket requirement.
         logger.info(
             "[SEARCH] size hard-empty after color filter — relaxing size "
-            f"(size={sorted(size_terms)} size_cm={sorted(size_cm_terms)})"
+            f"(size={sorted(size_terms)} size_cm={sorted(size_cm_terms)} "
+            f"size_category={sorted(size_category_terms)})"
         )
         unique_results = apply_attribute_post_filters(
             color_pool,
-            attribute_filters,
-            apply_size=False,
+            filters_without_size(attribute_filters),
+            apply_size=True,
             hard_size=True,
         )
         meta["size_relaxed"] = bool(unique_results)

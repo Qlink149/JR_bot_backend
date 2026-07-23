@@ -22,6 +22,7 @@ from qlink_chatbot.utils.jr_search_keywords import (
 from qlink_chatbot.utils.jr_search_llm_extract import resolve_keyword_with_llm_extraction
 from qlink_chatbot.utils.jr_search_mongo import (
     apply_search_pipeline,
+    classify_segment,
     filters_without_size,
     get_instock_products,
     mongo_search_cm_products,
@@ -56,12 +57,60 @@ def _strip_values_from_keyword(keyword: str, values) -> str:
     return "&".join(kept)
 
 
+def _strip_segment_types_from_keyword(keyword: str, segment_types: set[str]) -> str:
+    """Drop keyword &-segments whose classify_segment() is in segment_types."""
+    if not keyword or not segment_types:
+        return keyword or ""
+    kept = [
+        part.strip()
+        for part in keyword.split("&")
+        if part.strip() and classify_segment(part.strip()) not in segment_types
+    ]
+    return "&".join(kept)
+
+
+# Kisna-style: drop secondary facets before giving up on an empty Mongo $and.
+_MONGO_SEGMENT_DROP_ORDER: tuple[tuple[str, str], ...] = (
+    ("size", "No exact size match in catalog — showing other sizes."),
+    ("shape", "No rugs matched that shape with your other filters — showing other shapes."),
+    ("room", "Broadened search by dropping the room filter."),
+    ("pattern", "Broadened search by dropping the pattern filter."),
+    ("construction", "Broadened search by dropping the construction filter."),
+    ("material", "Broadened search by dropping the material filter."),
+    ("catalog_tag", "Broadened search by dropping the catalog-tag filter."),
+    ("weight", "Broadened search by dropping the weight filter."),
+    ("general", "Broadened search — showing closer catalog matches."),
+)
+
+_SEGMENT_TYPE_TO_FILTER_KEYS: dict[str, tuple[str, ...]] = {
+    "size": ("size", "size_cm", "size_category"),
+    "shape": ("shape",),
+    "room": ("room",),
+    "pattern": ("pattern",),
+    "construction": ("construction",),
+    "material": ("material",),
+    "catalog_tag": ("catalog_tag",),
+    "weight": ("weight_max",),
+}
+
+
 def _widen_price_filter(price_filter: dict | None, factor: float = 1.25) -> dict | None:
+    """Widen a budget band. Kisna drops price; we first widen, then drop.
+
+    Critical: for $gte / min floors, widening must LOWER the threshold
+    (amount / factor), not raise it.
+    """
     if not price_filter:
         return None
     out = dict(price_filter)
+    op = (out.get("operator") or "").strip()
     if "amount" in out and out["amount"] is not None:
-        out["amount"] = int(float(out["amount"]) * factor)
+        amount = float(out["amount"])
+        if op == "$gte":
+            out["amount"] = int(amount / factor)
+        else:
+            # $lte / default — raise the ceiling
+            out["amount"] = int(amount * factor)
     if "max_amount" in out and out["max_amount"] is not None:
         out["max_amount"] = int(float(out["max_amount"]) * factor)
     if "min_amount" in out and out["min_amount"] is not None:
@@ -77,6 +126,41 @@ def _filters_without_keys(attribute_filters: dict, *keys: str) -> dict:
         elif key in out:
             out[key] = None
     return out
+
+
+# Progressive post-filter relax order (Kisna: drop one constraint at a time + honest note).
+_PROGRESSIVE_RELAX_STEPS: tuple[tuple[str, str], ...] = (
+    (
+        "size_category",
+        "No exact size-bucket match — showing other sizes that fit your other filters.",
+    ),
+    (
+        "shape",
+        "No rugs matched that shape with your other filters — showing other shapes.",
+    ),
+    ("room", "Broadened search by dropping the room filter."),
+    ("weight_max", "Broadened search by dropping the weight filter."),
+    ("catalog_tag", "Broadened search by dropping the catalog-tag filter."),
+    ("pattern", "Broadened search by dropping the pattern filter."),
+    ("construction", "Broadened search by dropping the construction filter."),
+    ("material", "Broadened search by dropping the material filter."),
+)
+
+
+def _apply_drop_to_keyword(keyword: str, drop_key: str, values) -> str:
+    """Strip keyword segments for a dropped attribute key."""
+    if drop_key == "weight_max":
+        return _strip_segment_types_from_keyword(keyword, {"weight"})
+    if drop_key == "catalog_tag":
+        kw = _strip_values_from_keyword(keyword, values)
+        return _strip_segment_types_from_keyword(kw, {"catalog_tag"})
+    if drop_key in {"size", "size_cm", "size_category"}:
+        kw = _strip_values_from_keyword(keyword, values)
+        return _strip_segment_types_from_keyword(kw, {"size"}) or kw
+    if drop_key in {"shape", "room", "pattern", "construction", "material"}:
+        kw = _strip_values_from_keyword(keyword, values)
+        return _strip_segment_types_from_keyword(kw, {drop_key}) or kw
+    return _strip_values_from_keyword(keyword, values)
 
 # Kept for dashboard_routes imports
 product_color_collection = db["product_color"]
@@ -221,6 +305,51 @@ async def jaipur_rugs_product_search(
 
         logger.info(f"[SEARCH] raw results from {search_source}: {len(raw_results)}")
 
+        # Kisna-style: never give up on empty Mongo $and before dropping secondary segments.
+        effective_filters = _copy_attribute_filters(attribute_filters)
+        effective_keyword = clean_keyword
+        effective_price = price_filter
+        fallback_note = ""
+        if not raw_results and clean_keyword and "&" in clean_keyword:
+            working_segs = [s.strip() for s in clean_keyword.split("&") if s.strip()]
+            working_filters = _copy_attribute_filters(attribute_filters)
+            for drop_type, note in _MONGO_SEGMENT_DROP_ORDER:
+                typed = [s for s in working_segs if classify_segment(s) == drop_type]
+                if not typed:
+                    continue
+                # Never drop the last remaining color-bearing ask into empty keyword.
+                remaining = [s for s in working_segs if classify_segment(s) != drop_type]
+                if not remaining:
+                    continue
+                working_segs = remaining
+                for filter_key in _SEGMENT_TYPE_TO_FILTER_KEYS.get(drop_type, ()):
+                    working_filters = _filters_without_keys(working_filters, filter_key)
+                if drop_type == "size":
+                    working_filters = filters_without_size(working_filters)
+                trial_kw = "&".join(working_segs)
+                logger.info(
+                    f"[SEARCH] empty Mongo $and — retry without segment_type={drop_type} "
+                    f"keyword={trial_kw!r}"
+                )
+                trial_raw, trial_pre = await asyncio.to_thread(
+                    mongo_search_products,
+                    trial_kw,
+                )
+                if trial_raw:
+                    raw_results = trial_raw
+                    color_prefiltered = trial_pre
+                    clean_keyword = trial_kw
+                    effective_keyword = trial_kw
+                    effective_filters = working_filters
+                    attribute_filters = working_filters
+                    fallback_note = note
+                    search_source = f"mongo-search-relax-{drop_type}"
+                    logger.info(
+                        f"[SEARCH] recovered empty Mongo via drop={drop_type} "
+                        f"n={len(raw_results)}"
+                    )
+                    break
+
         if not raw_results:
             logger.warning(f"[SEARCH] no results for clean_keyword={clean_keyword!r}")
             return {"error": "No products found."}
@@ -243,7 +372,12 @@ async def jaipur_rugs_product_search(
             skip_color_post_filter=color_prefiltered,
         )
         size_relaxed = bool((pipeline_meta or {}).get("size_relaxed"))
-        fallback_note = ""
+        if size_relaxed and not fallback_note:
+            fallback_note = (
+                "No exact size match — showing closest available sizes that fit "
+                "your other filters."
+            )
+            effective_filters = filters_without_size(effective_filters)
 
         # Prefer catalog-label color at nearby sizes over yarn-% matches at exact size.
         size_requested = bool(
@@ -257,14 +391,26 @@ async def jaipur_rugs_product_search(
         )
         if size_requested and weak_or_empty and clean_keyword:
             kw_no_size = strip_size_segments_from_keyword(clean_keyword)
-            if kw_no_size and kw_no_size != clean_keyword:
+            has_size_bucket = bool(attribute_filters.get("size_category") or set())
+            # Size-category-only queries have no ft/cm segment to strip — still re-run
+            # without the size_category post-filter.
+            should_relax_size = (
+                (kw_no_size and kw_no_size != clean_keyword)
+                or (has_size_bucket and not unique_results)
+            )
+            if should_relax_size:
+                relax_keyword = (
+                    kw_no_size
+                    if (kw_no_size and kw_no_size != clean_keyword)
+                    else clean_keyword
+                )
                 logger.info(
                     f"[SEARCH] re-query without size for catalog color "
-                    f"(was tier={color_search_tier!r}) keyword={kw_no_size!r}"
+                    f"(was tier={color_search_tier!r}) keyword={relax_keyword!r}"
                 )
                 raw_relaxed, color_pre_relaxed = await asyncio.to_thread(
                     mongo_search_products,
-                    kw_no_size,
+                    relax_keyword,
                 )
                 relaxed_filters = filters_without_size(attribute_filters)
                 relaxed_results, relaxed_tier, relaxed_meta = await asyncio.to_thread(
@@ -288,27 +434,33 @@ async def jaipur_rugs_product_search(
                     unique_results = relaxed_results
                     color_search_tier = relaxed_tier
                     size_relaxed = True
+                    effective_filters = relaxed_filters
+                    effective_keyword = relax_keyword
+                    if not fallback_note:
+                        fallback_note = (
+                            "No exact size match — showing closest available sizes "
+                            "that fit your other filters."
+                        )
                     logger.info(
                         f"[SEARCH] using size-relaxed catalog results "
                         f"tier={color_search_tier!r} n={len(unique_results)}"
                     )
 
-        # Progressive filter relax (room → construction → material → price widen).
+        # Progressive filter relax (Kisna: drop one constraint + honest note).
         if not unique_results:
-            relax_steps = (
-                ("room", "Broadened search by dropping the room filter."),
-                ("construction", "Broadened search by dropping the construction filter."),
-                ("material", "Broadened search by dropping the material filter."),
-            )
             working_filters = _copy_attribute_filters(attribute_filters)
             working_keyword = clean_keyword
             working_price = price_filter
-            for drop_key, note in relax_steps:
+            for drop_key, note in _PROGRESSIVE_RELAX_STEPS:
                 values = working_filters.get(drop_key) or set()
                 if not values:
                     continue
                 working_filters = _filters_without_keys(working_filters, drop_key)
-                working_keyword = _strip_values_from_keyword(working_keyword, values)
+                working_keyword = _apply_drop_to_keyword(
+                    working_keyword, drop_key, values
+                )
+                if drop_key == "size_category":
+                    size_relaxed = True
                 if working_keyword:
                     raw_fb, color_pre_fb = await asyncio.to_thread(
                         mongo_search_products,
@@ -330,6 +482,9 @@ async def jaipur_rugs_product_search(
                     unique_results = fb_results
                     color_search_tier = fb_tier
                     fallback_note = note
+                    effective_filters = working_filters
+                    effective_keyword = working_keyword
+                    effective_price = working_price
                     logger.info(
                         f"[SEARCH] progressive fallback dropped={drop_key} "
                         f"n={len(unique_results)}"
@@ -338,21 +493,67 @@ async def jaipur_rugs_product_search(
 
             if not unique_results and working_price:
                 widened = _widen_price_filter(working_price, 1.25)
+                if working_keyword:
+                    raw_fb, color_pre_fb = await asyncio.to_thread(
+                        mongo_search_products,
+                        working_keyword,
+                    )
+                else:
+                    raw_fb = raw_results
+                    color_pre_fb = color_prefiltered
                 fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
                     apply_search_pipeline,
-                    raw_results,
+                    raw_fb,
                     color_check_terms=color_check_terms,
                     attribute_filters=working_filters,
                     price_filter=widened,
                     exclude_skus=exclude_skus,
-                    skip_color_post_filter=color_prefiltered,
+                    skip_color_post_filter=color_pre_fb,
                 )
                 if fb_results:
                     unique_results = fb_results
                     color_search_tier = fb_tier
-                    fallback_note = "No exact budget match — showing a slightly wider price range."
+                    fallback_note = (
+                        "No exact budget match — showing a slightly wider price range."
+                    )
+                    effective_filters = working_filters
+                    effective_keyword = working_keyword
+                    effective_price = widened
                     logger.info(
                         f"[SEARCH] progressive fallback widened price n={len(unique_results)}"
+                    )
+
+            # Kisna last resort: drop price entirely while keeping remaining filters.
+            if not unique_results and working_price:
+                if working_keyword:
+                    raw_fb, color_pre_fb = await asyncio.to_thread(
+                        mongo_search_products,
+                        working_keyword,
+                    )
+                else:
+                    raw_fb = raw_results
+                    color_pre_fb = color_prefiltered
+                fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
+                    apply_search_pipeline,
+                    raw_fb,
+                    color_check_terms=color_check_terms,
+                    attribute_filters=working_filters,
+                    price_filter=None,
+                    exclude_skus=exclude_skus,
+                    skip_color_post_filter=color_pre_fb,
+                )
+                if fb_results:
+                    unique_results = fb_results
+                    color_search_tier = fb_tier
+                    fallback_note = (
+                        "No rugs in that exact price range — showing closest matches "
+                        "with your other filters."
+                    )
+                    effective_filters = working_filters
+                    effective_keyword = working_keyword
+                    effective_price = None
+                    logger.info(
+                        f"[SEARCH] progressive fallback dropped price n={len(unique_results)}"
                     )
 
         if not unique_results:
@@ -427,9 +628,9 @@ async def jaipur_rugs_product_search(
                 p,
                 color_search_tier=color_search_tier,
                 match_terms=set(match_terms) if match_terms else set(),
-                exact_color_terms=attribute_filters.get("color_exact") or set(),
-                attribute_filters=attribute_filters,
-                price_filter=price_filter,
+                exact_color_terms=effective_filters.get("color_exact") or set(),
+                attribute_filters=effective_filters,
+                price_filter=effective_price,
                 breakdown_by_sku=breakdown_by_sku,
                 displayable_pool_size=len(displayable),
                 rank=rank_idx,

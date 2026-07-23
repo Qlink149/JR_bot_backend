@@ -1,6 +1,11 @@
+import math
 import re
 
-from qlink_chatbot.utils.jr_search_aliases import ROUND_SIZE_PATTERN, SIZE_PATTERN
+from qlink_chatbot.utils.jr_search_aliases import (
+    DIA_ROUND_PATTERN,
+    ROUND_SIZE_PATTERN,
+    SIZE_PATTERN,
+)
 
 
 def size_field_regex(size_text: str) -> str:
@@ -157,12 +162,25 @@ def product_matches_cm_size(product: dict, size_term: str, *, tolerance: int = C
 
 
 def product_sqft_from_ft_field(value: str) -> float | None:
-    """Estimate rug area in square feet from SizeInFT."""
+    """Estimate rug area in square feet from SizeInFT / SizeGroup round labels."""
     dims_cm = parse_ft_field_to_cm(value)
     if dims_cm:
         return (dims_cm[0] / CM_PER_FT) * (dims_cm[1] / CM_PER_FT)
-    text = (value or "").replace("'", "").replace("′", "")
-    match = SIZE_PATTERN.search(text)
+    text = (value or "").strip()
+    if not text:
+        return None
+    # Round / dia-round: area = π * (d/2)^2 in sq ft.
+    dia_m = DIA_ROUND_PATTERN.search(text) or ROUND_SIZE_PATTERN.search(text)
+    if dia_m:
+        try:
+            diameter_ft = float(dia_m.group(1))
+        except (TypeError, ValueError):
+            return None
+        if diameter_ft <= 0:
+            return None
+        return math.pi * (diameter_ft / 2.0) ** 2
+    text_plain = text.replace("'", "").replace("′", "")
+    match = SIZE_PATTERN.search(text_plain)
     if match:
         return float(int(match.group(1)) * int(match.group(2)))
     return None
@@ -234,10 +252,11 @@ def product_matches_size_category(product: dict, category: str) -> bool:
         if "oversize" in size_group:
             return True
 
-    sqft = product_sqft_from_ft_field(str(product.get("SizeInFT") or ""))
-    if sqft is not None:
-        lo, hi = bounds
-        return lo <= sqft < hi
+    for field in ("SizeInFT", "SizeGroupInFT"):
+        sqft = product_sqft_from_ft_field(str(product.get(field) or ""))
+        if sqft is not None:
+            lo, hi = bounds
+            return lo <= sqft < hi
 
     haystack = " ".join(
         str(product.get(field) or "")

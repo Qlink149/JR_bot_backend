@@ -10,9 +10,7 @@ from qlink_chatbot.utils.jr_search_mongo import (
     product_matches_catalog_color,
     product_matches_color_terms,
     product_matches_exact_grcolor_terms,
-    size_regex,
 )
-import re
 
 COLOR_TIER_METHOD = {
     "exact_catalog_color": "catalog_label",
@@ -125,13 +123,9 @@ def _sole_dominant_requested(
 def _product_matches_size_terms(product: dict, size_terms: set[str]) -> bool:
     if not size_terms:
         return False
-    for term in size_terms:
-        if any(
-            re.search(size_regex(str(term)), str(product.get(field) or ""), re.IGNORECASE)
-            for field in ("SizeInFT", "SizeInCM")
-        ):
-            return True
-    return False
+    from qlink_chatbot.utils.jr_search_sizes import product_matches_size_term
+
+    return any(product_matches_size_term(product, str(term)) for term in size_terms)
 
 
 def compute_color_match_score(
@@ -363,8 +357,8 @@ def build_product_recommendation_reason(
         ("room", "room"),
         ("multicolor", "multicolor"),
     ):
-        # When size was relaxed, don't claim an exact size match in the summary.
-        if size_relaxed and key in {"size", "size_cm"}:
+        # When size was relaxed, don't claim exact size / size-bucket matches.
+        if size_relaxed and key in {"size", "size_cm", "size_category"}:
             continue
         values = attribute_filters.get(key) or set()
         if values:
