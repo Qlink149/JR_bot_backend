@@ -85,7 +85,7 @@ tools = [
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Search keyword built ONLY from the CURRENT user message. Use '&' to AND attributes. Supported: color, shape, size (8x10), material, construction, style/pattern, room, price, AND mega-menu tags: 'new arrival' / 'bestsellers' / 'outdoor' / 'antique' / 'rug swatch'. Examples: 'bestsellers', 'outdoor&under INR 30000', 'beige', 'blue&round', 'red&8x10'. NEVER copy colors/sizes/materials/rooms from earlier turns unless the user restates them or clearly refines ('same but cheaper', 'also in wool')."
+                    "description": "Search keyword built ONLY from the CURRENT user message. Use '&' to AND attributes. Supported: color, shape, size (8x10), material, construction, style/pattern, room, price, collection/design names (e.g. aurelia), AND mega-menu tags: 'new arrival' / 'bestsellers' / 'outdoor' / 'antique' / 'rug swatch'. Soft phrasing still counts — pass the ask as-is or as attributes: 'is there any new arrival' → 'new arrival'; 'aurelia in red' → 'aurelia&red'. Examples: 'bestsellers', 'outdoor&under INR 30000', 'beige', 'blue&round', 'red&8x10', 'aurelia&red', 'new arrival'. NEVER copy colors/sizes/materials/rooms/collections from earlier turns unless the user restates them or clearly refines ('same but cheaper', 'also in wool')."
                 },
                 "currency": {
                     "type": "string",

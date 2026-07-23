@@ -238,6 +238,31 @@ def _should_ignore_previous_search(keyword: str, user_message: str = "") -> bool
     return _message_has_catalog_attrs(text)
 
 
+def _should_pass_previous_to_llm(user_message: str, *, llm_primary: bool = False) -> bool:
+    """When False, previous search must not be shown to the extraction LLM.
+
+    In llm_primary we do NOT gate on regex catalog hits — soft phrasing like
+    "is there any new arrival" / "aurelia in red" has no regex attrs but is still
+    a fresh ask. Only clear refine / price-only follow-ups inherit previous.
+    """
+    text = (user_message or "").strip()
+    if not text:
+        return False
+    if _REFINEMENT_HINT.search(text):
+        return True
+    # Budget-only follow-up: "under 30k" alone after a prior search.
+    if _source_has_price_intent(text) and not _message_has_catalog_attrs(text):
+        # Soft catalog phrases rarely have price — if they do + no attrs, still
+        # prefer LLM to treat as new when llm_primary and message is long/browsey.
+        if llm_primary and len(text.split()) >= 4:
+            return False
+        return True
+    if llm_primary:
+        return False
+    # hybrid/regex: keep legacy regex-based fresh-ask detection inverted
+    return not _should_ignore_previous_search("", text)
+
+
 def tool_keyword_has_context_bleed(model_kw: str, user_message: str) -> bool:
     """True when the agent tool keyword invents catalog attrs absent from the user ask."""
     model = (model_kw or "").strip()
@@ -314,10 +339,31 @@ def _sanitize_attrs_to_current_message(
     *,
     keyword: str,
     user_message: str,
+    trust_llm: bool = False,
 ) -> dict:
-    """Drop previous-search / polluted tool-keyword bleed; keep current ask only."""
-    # Prefer the human message — agent tool keyword often reuses prior filters.
+    """Drop previous-search / polluted tool-keyword bleed; keep current ask only.
+
+    When trust_llm=True (llm_primary), keep the LLM's validated attributes and
+    only clear fields that look like prior-turn bleed relative to the user text
+    via a light user-message-only backfill merge — never wipe LLM catalog_tags
+    / collection / colors that regex failed to see (soft phrasing).
+    """
     current = (user_message or keyword or "").strip()
+    if trust_llm:
+        out = dict(attrs)
+        out["refinement"] = "new"
+        # Prefer LLM values; optionally add anything regex sees in the user text.
+        out, notes = backfill_attrs_from_regex(
+            out,
+            keyword="",
+            user_message=current,
+            user_message_only=True,
+        )
+        if notes:
+            logger.info(f"[LLM-EXTRACT] trust_llm fresh-search merge: {notes}")
+        return out
+
+    # Prefer the human message — agent tool keyword often reuses prior filters.
     clean: dict[str, Any] = {
         "colors": [],
         "shapes": [],
@@ -340,15 +386,47 @@ def _sanitize_attrs_to_current_message(
         clean,
         keyword="",
         user_message=current,
+        user_message_only=True,
     )
-    # Keep LLM catalog_tags only if they appear in the current user ask.
-    _pf, _clean, _colors, current_attrs = normalise_keyword(current)
-    allowed_tags = set(current_attrs.get("catalog_tag") or set())
+    # Keep LLM catalog_tags / collection / colors even when regex is blind.
     for tag in attrs.get("catalog_tags") or []:
-        if tag in allowed_tags and tag not in clean["catalog_tags"]:
+        if tag not in clean["catalog_tags"]:
             clean["catalog_tags"].append(tag)
-    if not clean["catalog_tags"] and allowed_tags:
-        clean["catalog_tags"] = sorted(allowed_tags)
+    if attrs.get("collection") and not clean.get("collection"):
+        clean["collection"] = attrs["collection"]
+    for color in attrs.get("colors") or []:
+        if color not in clean["colors"]:
+            clean["colors"].append(color)
+    for shape in attrs.get("shapes") or []:
+        if shape not in clean["shapes"]:
+            clean["shapes"].append(shape)
+    for room in attrs.get("rooms") or []:
+        if room not in clean["rooms"]:
+            clean["rooms"].append(room)
+    for size in attrs.get("sizes_ft") or []:
+        if size not in clean["sizes_ft"]:
+            clean["sizes_ft"].append(size)
+    for size in attrs.get("sizes_cm") or []:
+        if size not in clean["sizes_cm"]:
+            clean["sizes_cm"].append(size)
+    for cat in attrs.get("size_categories") or []:
+        if cat not in clean["size_categories"]:
+            clean["size_categories"].append(cat)
+    for material in attrs.get("materials") or []:
+        if material not in clean["materials"]:
+            clean["materials"].append(material)
+    for construction in attrs.get("constructions") or []:
+        if construction not in clean["constructions"]:
+            clean["constructions"].append(construction)
+    for pattern in attrs.get("patterns") or []:
+        if pattern not in clean["patterns"]:
+            clean["patterns"].append(pattern)
+    if attrs.get("sku") and not clean.get("sku"):
+        clean["sku"] = attrs["sku"]
+    if attrs.get("multicolor"):
+        clean["multicolor"] = True
+    if attrs.get("weight_max_kg") and not clean.get("weight_max_kg"):
+        clean["weight_max_kg"] = attrs["weight_max_kg"]
 
     # Preserve price when the current message has budget intent.
     if attrs.get("price") and _source_has_price_intent(current):
@@ -966,91 +1044,109 @@ def build_extraction_prompt() -> str:
     return f"""You extract product-search attributes for Jaipur Rugs. Output MUST follow the JSON schema.
 
 MISSION
-Extract EVERY concrete shopping attribute the user (or tool keyword) asked for.
-Missing a stated color/size/material is a critical failure. Inventing attributes is also a failure.
+You are the PRIMARY understanding layer for shopping intent.
+Read natural language (including soft / conversational phrasing) and extract every attribute the shopper meant.
+Missing a stated color, size, shape, room, collection, budget, or catalog tag is a critical failure.
+Inventing attributes the user did NOT ask for in THIS turn is also a critical failure.
 
-SOURCE PRIORITY (read ALL of them; merge attributes from every source):
-1) User message (any language / typos / slang)
-2) Agent tool keyword if present (often already structured like purple&12x15 — TRUST it)
-3) Previous search keyword + recent chat only for refinement/show_more context
+SOURCE PRIORITY (STRICT)
+1) USER MESSAGE — source of truth. Always wins.
+2) AGENT TOOL KEYWORD — untrusted draft. It often reuses OLD filters from chat history.
+   Keep a tool-keyword attribute ONLY when the same intent is clearly present in the USER MESSAGE.
+   If the tool keyword adds colors/sizes/materials/rooms/collections/tags the user did not say now → DROP them.
+3) PREVIOUS SEARCH / RECENT CHAT — refinement context ONLY.
+   Use them ONLY when refinement is refine_previous or show_more
+   (e.g. "same but cheaper", "also in wool", "show more", "under 30k" alone after a prior search).
+   For ANY new ask, set refinement="new" and IGNORE previous colors/sizes/materials/rooms/collections/tags.
 
-NEVER-DROP RULES
-- If a color word appears in the user message OR tool keyword, it MUST appear in colors[].
-  Examples that MUST yield colors=["purple"]: "purple rugs", "show purple", "बैंगनी", "baingani", "purple&12x15".
-- If a foot size appears (8x10, 8×10, 8*10, 8 by 10, 12x15), put it in sizes_ft as NxM (ascii x).
-  "in range of size 12*15" / "size 12x15" / "12 by 15" → sizes_ft=["12x15"].
-- If both color AND size are present, extract BOTH. Never keep only size.
-- Typos: rungs→rugs (ignore), purpel→purple, gry→grey, woollen→wool when clear.
-- Multilingual: map common color words to English catalog keys
-  (e.g. baingani/बैंगनी→purple, neela/नीला→blue, laal/लाल→red, safed→white, kala→black).
-- Do NOT treat "range of size" as a price range. Size language ≠ price.
+NEVER-DROP (from USER MESSAGE)
+- Color words anywhere → colors[] ("aurelia in red", "red color", "baingani", "purple rugs").
+- Collection / design / product-line names → collection (e.g. Aurelia, Provenance, Alhambra).
+  "show me aurelia in red" → collection="Aurelia", colors=["red"], refinement="new".
+- Foot sizes (8x10, 8×10, 8*10, 8 by 10) → sizes_ft as NxM.
+- Shape words (round, square, runner, …) → shapes[].
+- Room words (living room, bedroom, …) → rooms[].
+- Materials / constructions when stated → materials[] / constructions[].
+- Budget / between X and Y / above / under → has_price_filter + amounts.
+- Soft mega-menu / catalog phrasing (must still map):
+  "is there any new arrival", "any new arrivals?", "do you have new arrivals"
+    → catalog_tags=["new"], refinement="new"
+  "bestsellers" / "best sellers" → catalog_tags=["bestseller"]
+  "outdoor rugs" → catalog_tags=["outdoor"] (NOT rooms)
+  "antique" → catalog_tags=["antique"]
+  "swatch" → catalog_tags=["swatch"]
+  Soft catalog browse MUST NOT keep prior aurelia/red/round/size filters.
+
+MULTILINGUAL
+Map common Hindi/Hinglish color words to English catalog keys
+(baingani/बैंगनी→purple, neela/नीला→blue, laal/लाल→red, safed→white, kala→black).
+Typos: purpel→purple, gry→grey, woollen→wool when clear.
 
 SIZE RULES
-- Foot dimensions → sizes_ft (normalize separators * × by / - to x). Never put 8x10 in size_categories.
-- "6 dia round" / "8' round" → sizes_ft=["6 dia round"] or ["8 round"] AND shapes=["round"].
-- size_categories only for bucket words: small, medium, large, oversize (map oversized→oversize).
-- CM dimensions (e.g. 240x300 cm, 240×300cm) → sizes_cm.
-
-CATALOG TAG RULES (website mega-menu)
-- new arrival / new arrivals → catalog_tags=["new"]
-- bestsellers / best seller → catalog_tags=["bestseller"]
-- antique rugs → catalog_tags=["antique"]
-- rug swatch / swatches → catalog_tags=["swatch"]
-- outdoor rugs → catalog_tags=["outdoor"] (NOT rooms — Outdoor is a product tag)
-- Fresh mega-menu browse (e.g. only "new arrival rugs" / "bestsellers"): set refinement="new"
-  and do NOT copy colors/sizes/materials/rooms from PREVIOUS SEARCH KEYWORD.
-  Previous search is for refine_previous / show_more only (also / same / but in blue / show more).
+- Foot dimensions → sizes_ft (normalize * × by / - to ascii x). Never put 8x10 in size_categories.
+- "6 dia round" / "8' round" → sizes_ft + shapes=["round"].
+- size_categories only for bucket words: small, medium, large, oversize.
+- CM dimensions → sizes_cm.
+- Do NOT treat "range of size" as a price range.
 
 PRICE RULES
-- Any budget/price/cost/above/under/over/below/between/k/lakh/lac/cr → has_price_filter=true.
-- Expand shorthand to full integers: 50k→50000, 1.5k→1500, 2 lakh/2lac/2l→200000, 4lc→400000, 1cr→10000000.
-- price_type: gte | lte | range | none. price_currency: INR|USD|EUR|GBP|AUD|CHF|SGD|AED.
+- above/under/over/below/between/budget/k/lakh/lac/cr → has_price_filter=true.
+- Expand shorthand: 50k→50000, 1.5k→1500, 2 lakh→200000, 1cr→10000000.
+- "above 5000 usd and below 10000 usd" / "between USD 5000 to USD 10000"
+  → price_type=range, price_currency=USD, price_min=5000, price_max=10000.
+- price_type: gte | lte | range | none. Currencies: INR|USD|EUR|GBP|AUD|CHF|SGD|AED.
 - price_raw_phrase = exact price words from the user. Never invent amounts.
 
-CATALOG RULES
-- colors/shapes/patterns/materials/constructions/rooms/catalog_tags MUST use keys from the allowed lists below.
+CATALOG KEY RULES
+- colors/shapes/patterns/materials/constructions/rooms/catalog_tags MUST use keys from the allowed lists.
 - Empty array only when that attribute was NOT mentioned. Do not guess.
-- refinement: refine_previous | show_more | new.
+- refinement: new | refine_previous | show_more.
 
-EXAMPLES (attribute intent only):
+EXAMPLES
 "show me above 50k usd"
-→ has_price_filter=true, price_type=gte, price_currency=USD, price_amount=50000
+→ has_price_filter=true, price_type=gte, price_currency=USD, price_amount=50000, refinement="new"
 
 "blue round rugs under INR 50000"
-→ colors=["blue"], shapes=["round"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=50000
+→ colors=["blue"], shapes=["round"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=50000, refinement="new"
 
 "show me purple rugs in range of size 12*15"
-→ colors=["purple"], sizes_ft=["12x15"]   ← BOTH required; "range of size" is NOT price
+→ colors=["purple"], sizes_ft=["12x15"], refinement="new"
 
-"purple&12x15" (tool keyword)
-→ colors=["purple"], sizes_ft=["12x15"]
+"show me red rugs above 5000 usd and below 10000 usd round shape for my living room medium size"
+→ colors=["red"], shapes=["round"], rooms=["living room"], size_categories=["medium"],
+  has_price_filter=true, price_type=range, price_currency=USD, price_min=5000, price_max=10000, refinement="new"
 
-"show me red wool 8x10"
-→ colors=["red"], materials=["wool"], sizes_ft=["8x10"]
+"red rug for my living room round shape"
+→ colors=["red"], shapes=["round"], rooms=["living room"], refinement="new"
 
-"red medium size rug above 10 lac for bedroom"
-→ colors=["red"], size_categories=["medium"], rooms=["bedroom"], has_price_filter=true, price_type=gte, price_currency=INR, price_amount=1000000
+"show me aurelia"
+→ collection="Aurelia", refinement="new"
 
-"baingani gol dari 8x10"
-→ colors=["purple"], shapes=["round"], sizes_ft=["8x10"]
+"show me aurelia in red color"
+→ collection="Aurelia", colors=["red"], refinement="new"
+  (do NOT keep prior round/8x10/wool from previous search)
 
-"hand tufted blue round under 2 lakh"
-→ colors=["blue"], shapes=["round"], constructions=["hand tufted"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=200000
+"is there any new arrival"
+→ catalog_tags=["new"], refinement="new"
+  (do NOT keep prior collection/color/size)
 
-"show me new arrival rugs"
-→ catalog_tags=["new"]
+"new arrival"
+→ catalog_tags=["new"], refinement="new"
 
 "bestsellers"
-→ catalog_tags=["bestseller"]
+→ catalog_tags=["bestseller"], refinement="new"
 
-"outdoor rugs"
-→ catalog_tags=["outdoor"]
+"outdoor rugs under 30k"
+→ catalog_tags=["outdoor"], has_price_filter=true, price_type=lte, price_currency=INR, price_amount=30000, refinement="new"
 
-"antique rugs"
-→ catalog_tags=["antique"]
+"same but in blue" / "also in wool" / "under 30k" alone after a prior search
+→ refinement="refine_previous" (inherit prior attrs the user did not replace)
 
-"rug swatch"
-→ catalog_tags=["swatch"]
+"show more" / "any others"
+→ refinement="show_more"
+
+"baingani gol dari 8x10"
+→ colors=["purple"], shapes=["round"], sizes_ft=["8x10"], refinement="new"
 
 {_catalog_hints()}"""
 
@@ -1060,14 +1156,18 @@ def backfill_attrs_from_regex(
     *,
     keyword: str = "",
     user_message: str = "",
+    user_message_only: bool = False,
 ) -> tuple[dict, list[str]]:
-    """Fill gaps the LLM missed using deterministic regex/alias parsing.
+    """Optional safety-net: fill gaps the LLM missed via alias parsing.
 
     Never removes LLM values — only adds missing colors/sizes/shapes/etc.
-    Parses keyword and user_message separately (joining them confuses the parser).
+    When user_message_only=True (llm_primary), ignore polluted tool keywords.
     """
     notes: list[str] = []
-    sources = [s for s in ((keyword or "").strip(), (user_message or "").strip()) if s]
+    if user_message_only:
+        sources = [s for s in ((user_message or "").strip(),) if s]
+    else:
+        sources = [s for s in ((keyword or "").strip(), (user_message or "").strip()) if s]
     if not sources:
         return attrs, notes
 
@@ -1189,22 +1289,30 @@ async def extract_search_attributes(
     tool_kw = (keyword or "").strip()
 
     user_content = (
-        "Extract ALL search attributes from the sources below. "
-        "If a color or size appears in ANY source, you MUST include it.\n\n"
+        "Extract search attributes. USER MESSAGE is the only source of truth.\n"
+        "Do not invent filters. Soft phrasing still counts "
+        "(e.g. 'is there any new arrival' → catalog_tags=[\"new\"]).\n\n"
         f"USER MESSAGE:\n{query_text}\n\n"
         f"Default currency if not specified: {default_currency}\n"
         f"User country code: {country_code or 'unknown'}"
     )
     if tool_kw and tool_kw.lower() != query_text.lower():
         user_content += (
-            f"\n\nAGENT TOOL KEYWORD (first-class source — parse every & segment):\n{tool_kw}"
+            "\n\nAGENT TOOL KEYWORD (UNTRUSTED — may contain prior-turn bleed).\n"
+            "Keep a segment ONLY if the USER MESSAGE clearly asks for it; "
+            f"otherwise DROP it:\n{tool_kw}"
         )
     if previous_search_keyword:
         user_content += (
-            f"\n\nPREVIOUS SEARCH KEYWORD (refinement context only):\n{previous_search_keyword}"
+            "\n\nPREVIOUS SEARCH KEYWORD (use ONLY if refinement is "
+            "refine_previous or show_more; otherwise IGNORE completely):\n"
+            f"{previous_search_keyword}"
         )
     if chat_context:
-        user_content += f"\n\nRECENT CONVERSATION:\n{chat_context}"
+        user_content += (
+            "\n\nRECENT CONVERSATION (refinement context only; "
+            f"do not copy old filters into a new ask):\n{chat_context}"
+        )
 
     try:
         response = await _client.responses.create(
@@ -1226,10 +1334,13 @@ async def extract_search_attributes(
             default_currency=default_currency,
             llm_primary=llm_primary,
         )
+        # llm_primary: never backfill from polluted tool keywords — optional
+        # user-message-only safety net only.
         attrs, backfill_notes = backfill_attrs_from_regex(
             attrs,
-            keyword=tool_kw,
+            keyword="" if llm_primary else tool_kw,
             user_message=query_text,
+            user_message_only=llm_primary,
         )
         dropped.extend(backfill_notes)
         return attrs, dropped
@@ -1289,10 +1400,18 @@ async def resolve_keyword_with_llm_extraction(
         return kw, {"ran": False, "mode": mode, "reason": reason}
 
     # Detect from the human message first — tool keyword may still say "new&…"
-    ignore_previous = _should_ignore_previous_search(
-        "",
+    is_llm_primary = mode == "llm_primary"
+    pass_previous = _should_pass_previous_to_llm(
         user_message or source,
-    ) or _should_ignore_previous_search(kw, user_message or source)
+        llm_primary=is_llm_primary,
+    )
+    ignore_previous = not pass_previous
+    if not is_llm_primary:
+        # hybrid: also drop previous when regex sees a fresh catalog ask
+        ignore_previous = ignore_previous or _should_ignore_previous_search(
+            "",
+            user_message or source,
+        ) or _should_ignore_previous_search(kw, user_message or source)
     prev_for_llm = "" if ignore_previous else previous_search_keyword
     context_for_llm = "" if ignore_previous else chat_context
     extract_kw = kw
@@ -1323,14 +1442,22 @@ async def resolve_keyword_with_llm_extraction(
         chat_context=context_for_llm,
         detected_currency=detected_currency,
         country_code=country_code,
-        llm_primary=(mode == "llm_primary"),
+        llm_primary=is_llm_primary,
     )
+
+    refinement = (attrs.get("refinement") or "").strip().lower()
+    if refinement == "new":
+        ignore_previous = True
+    elif refinement in {"refine_previous", "show_more"} and previous_search_keyword:
+        # LLM asked to refine — keep attrs as returned (previous was available).
+        ignore_previous = False
 
     if ignore_previous:
         attrs = _sanitize_attrs_to_current_message(
             attrs,
             keyword="",
             user_message=extract_source,
+            trust_llm=is_llm_primary,
         )
         dropped = list(dropped) + ["sanitized:fresh_search_browse"]
 

@@ -94,6 +94,14 @@ Always call `jaipur_rugs_product_search` for these — never invent "no rugs fou
 {"keyword": "antique"}
 {"keyword": "rug swatch"}
 
+Soft / conversational phrasing still counts as a search (keyword mirrors the ask):
+{"keyword": "is there any new arrival"}
+{"keyword": "aurelia in red"}
+{"keyword": "show me aurelia"}
+
+Collection + color is one search, not two:
+{"keyword": "aurelia&red"}
+
 Multi-attribute rule (JR API PDF): use simple terms with & for AND, || for OR within one attribute.
 Example from API docs: "red&blue||vintage" means red AND (blue OR vintage).
 Do NOT expand colors with || when combining with other attributes.
