@@ -3,6 +3,7 @@ import re
 from qlink_chatbot.utils.jr_search_aliases import (
     CATALOG_TAG_ALIASES,
     COLOR_ALIASES,
+    HINGLISH_COLOR_ALIASES,
     CONSTRUCTION_KEYWORDS,
     DIA_ROUND_PATTERN,
     MATERIAL_KEYWORDS,
@@ -90,6 +91,16 @@ def preprocess_natural_language(keyword: str) -> str:
             found.append(kw)
             remaining = remaining.replace(kw, " ").strip()
 
+    for alias in sorted(HINGLISH_COLOR_ALIASES, key=len, reverse=True):
+        # Devanagari has no \b word boundaries — use plain contains for non-ASCII.
+        if alias.isascii():
+            pattern = rf"\b{re.escape(alias)}\b"
+        else:
+            pattern = re.escape(alias)
+        if re.search(pattern, remaining):
+            found.append(HINGLISH_COLOR_ALIASES[alias])
+            remaining = re.sub(pattern, " ", remaining).strip()
+
     for alias in sorted(COLOR_ALIASES, key=len, reverse=True):
         if re.search(rf"\b{re.escape(alias)}\b", remaining):
             found.append(alias)
@@ -150,15 +161,23 @@ def preprocess_natural_language(keyword: str) -> str:
         else:
             found.append(size_text)
 
-    if len(found) >= 2:
-        return "&".join(found)
-    if len(found) == 1:
-        if WEIGHT_PATTERN.search(found[0]):
-            return found[0].replace(" ", "")
-        if found[0].lower() in MULTICOLOR_KEYS:
-            return "multicolor"
-        if parse_requested_cm_size(found[0]):
-            return found[0]
+    if found:
+        # Single hits matter for soft phrasing ("is there any new arrival" → new).
+        ordered = list(dict.fromkeys(found))
+        if len(ordered) == 1 and WEIGHT_PATTERN.search(ordered[0]):
+            joined = ordered[0].replace(" ", "")
+        else:
+            joined = "&".join(ordered)
+        # Keep budget phrases that alias extraction removed from `remaining`
+        # (e.g. "bestsellers under 1 lakh" → bestseller&under INR 100000).
+        price_filter, _ = extract_price_filter_from_text(text)
+        if price_filter:
+            from qlink_chatbot.utils.jr_search_currency import price_filter_to_keyword
+
+            price_kw = price_filter_to_keyword(price_filter)
+            if price_kw and price_kw.lower() not in joined.lower():
+                return f"{joined}&{price_kw}"
+        return joined
     return keyword.strip()
 
 

@@ -62,16 +62,13 @@ def test_mixture_intent():
     assert keyword_has_mixture_colors("purple&12x15") is False
 
 
-def test_mixture_mongo_clause_includes_colorfamily_for_strict_pink():
-    """Strict pink alone excludes ColorFamily; mixture mode includes it."""
-    single = segment_to_mongo_clause("pink", mixture_mode=False)
+def test_mongo_clause_includes_colorfamily_for_strict_primary_colors():
+    """Site chips: red/pink single-color recall includes ColorFamily."""
+    for color in ("red", "pink"):
+        single = segment_to_mongo_clause(color, mixture_mode=False)
+        assert "raw.ColorFamily" in str(single), color
     mixture = segment_to_mongo_clause("pink", mixture_mode=True)
-    single_s = str(single)
-    mixture_s = str(mixture)
-    assert "ColorFamily" not in single_s or "raw.ColorFamily" not in single_s
-    # Strict single pink should not open ColorFamily recall.
-    assert "raw.ColorFamily" not in single_s
-    assert "raw.ColorFamily" in mixture_s
+    assert "raw.ColorFamily" in str(mixture)
 
 
 def test_mixture_requires_each_exact_color():
@@ -94,17 +91,30 @@ def test_catalog_color_matches_grcolor_alias():
     )
 
 
-def test_single_color_rejects_mixture_family():
-    terms = set(color_search_terms("purple"))
+def test_single_color_accepts_site_family_chips():
+    """'Red and Orange' is a site ColorFamily chip for red — must match."""
+    red_terms = set(color_search_terms("red"))
     assert product_matches_single_color_family(
-        _rug(ColorFamily="Purple"), terms
+        _rug(GrColor="Soft Coral", ColorFamily="Red and Orange"), red_terms
     )
+    assert product_matches_single_color_family(
+        _rug(ColorFamily="Red"), red_terms
+    )
+    # Wrong primary color still rejected.
     assert not product_matches_single_color_family(
-        _rug(ColorFamily="Pink and Purple"), terms
+        _rug(ColorFamily="Pink and Purple"), red_terms
+    )
+    purple_terms = set(color_search_terms("purple"))
+    assert product_matches_single_color_family(
+        _rug(ColorFamily="Purple"), purple_terms
+    )
+    assert product_matches_single_color_family(
+        _rug(ColorFamily="Pink and Purple"), purple_terms
     )
 
 
 def test_pipeline_prefers_catalog_over_pink_purple_family():
+    """GrColor purple stays in the pool; soft family may too — ranking demotes it."""
     rose = _rug(
         SKU="ROSE-1",
         GrColor="Rose Smoke",
@@ -129,8 +139,22 @@ def test_pipeline_prefers_catalog_over_pink_purple_family():
         exclude_skus=None,
     )
     assert tier == "exact_catalog_color"
-    assert [p["SKU"] for p in results] == ["DARK-1"]
+    skus = {p["SKU"] for p in results}
+    assert "DARK-1" in skus
     assert meta.get("size_relaxed") is False
+    # Nearest-first: pure GrColor purple beats ColorFamily-only soft match.
+    selected, scores = select_top_products(
+        results,
+        match_terms=set(color_search_terms("purple")),
+        exact_color_terms={"purple"},
+        breakdown_by_sku={},
+        color_search_tier=tier,
+        limit=2,
+    )
+    assert selected[0]["SKU"] == "DARK-1"
+    assert scores[0]["catalog_score"] > (
+        scores[1]["catalog_score"] if len(scores) > 1 else 0
+    )
 
 
 def test_pipeline_mixture_allows_pink_and_purple_family():
@@ -287,3 +311,74 @@ def test_border_only_demoted_vs_ground_color():
     )
     assert selected[0]["SKU"] == "GND"
     assert scores[1].get("border_only") is True or scores[0]["sort_key"] > scores[1]["sort_key"]
+
+
+def test_red_family_soft_coral_recalled_and_ranked_below_grcolor_red():
+    """PAE-5080-class: Soft Coral + ColorFamily 'Red and Orange' must pass red filter.
+
+    Pure GrColor red still ranks first (nearest-first).
+    """
+    soft_coral = _rug(
+        SKU="PAE-5080-0001",
+        GrColor="Soft Coral",
+        ColorFamily="Red and Orange",
+        Shape="Round",
+        SizeInFT="9 Round",
+        SizeGroupInFT="9 Dia Round",
+    )
+    hard_red = _rug(
+        SKU="RED-RECT-1",
+        GrColor="Crimson Red",
+        ColorFamily="Red",
+        Shape="Rectangle",
+        SizeInFT="8x10",
+        SizeGroupInFT="8X10",
+    )
+    results, tier, _meta = apply_search_pipeline(
+        [soft_coral, hard_red],
+        color_check_terms=set(color_search_terms("red")),
+        attribute_filters={
+            "color_exact": {"red"},
+            "color": set(color_search_terms("red")),
+            "shape": {"round"},
+        },
+        price_filter=None,
+        exclude_skus=None,
+    )
+    assert tier in {"exact_catalog_color", "similar_catalog_color"}
+    assert [p["SKU"] for p in results] == ["PAE-5080-0001"]
+
+    # Without shape: both recalled; GrColor red ranks above ColorFamily soft coral.
+    both, tier_both, _ = apply_search_pipeline(
+        [soft_coral, hard_red],
+        color_check_terms=set(color_search_terms("red")),
+        attribute_filters={
+            "color_exact": {"red"},
+            "color": set(color_search_terms("red")),
+        },
+        price_filter=None,
+        exclude_skus=None,
+    )
+    assert {p["SKU"] for p in both} == {"PAE-5080-0001", "RED-RECT-1"}
+    selected, scores = select_top_products(
+        both,
+        match_terms=set(color_search_terms("red")),
+        exact_color_terms={"red"},
+        breakdown_by_sku={},
+        color_search_tier=tier_both,
+        limit=2,
+    )
+    assert selected[0]["SKU"] == "RED-RECT-1"
+    assert scores[0]["catalog_score"] > scores[1]["catalog_score"]
+    assert scores[1]["colorfamily_hit"] is True
+
+
+def test_build_search_tokens_indexes_colorfamily_constituents():
+    from qlink_chatbot.utils.jr_search_index import build_search_tokens
+
+    tokens = build_search_tokens(
+        _rug(GrColor="Soft Coral", ColorFamily="Red and Orange")
+    )
+    assert "red" in tokens
+    assert "orange" in tokens
+    assert "soft" in tokens or "coral" in tokens

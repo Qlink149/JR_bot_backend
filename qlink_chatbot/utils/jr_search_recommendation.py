@@ -98,7 +98,8 @@ def _closeness_band(
     if requested_pct > 0:
         return CLOSENESS_ACCENT
     # No yarn rows: trust catalog labels as "near" so named colors still beat accents.
-    if catalog_score >= 2:
+    # catalog_score: 3 exact GrColor, 2 alias/DisplayFilter, 1 ColorFamily soft chip.
+    if catalog_score >= 3:
         return CLOSENESS_DOMINANT
     if catalog_score >= 1:
         return CLOSENESS_SECONDARY
@@ -140,7 +141,7 @@ def compute_color_match_score(
     """
     Nearest-first rank key (highest first) — same ladder for every color:
 
-    1) catalog GrColor exact user word > alias/DisplayFilter
+    1) catalog GrColor exact user word > alias/DisplayFilter > ColorFamily soft chip
     2) yarn closeness (dominant > secondary > accent > unknown)
     3) sole-dominant among ALL yarn colors
     4) requested yarn %
@@ -169,8 +170,17 @@ def compute_color_match_score(
         else False
     )
     catalog_primary = product_matches_catalog_color(product, terms) if terms else False
-    # 2 = exact user color on GrColor, 1 = alias/DisplayFilter catalog hit, 0 = none
-    catalog_score = 2 if exact_user_grcolor else (1 if catalog_primary else 0)
+    family_hit = bool(catalog_hits.get("ColorFamily")) if terms else False
+    # 3 = exact GrColor user word, 2 = GrColor alias/DisplayFilter,
+    # 1 = ColorFamily soft chip (e.g. Soft Coral + "Red and Orange"), 0 = none
+    if exact_user_grcolor:
+        catalog_score = 3
+    elif catalog_primary:
+        catalog_score = 2
+    elif family_hit:
+        catalog_score = 1
+    else:
+        catalog_score = 0
 
     sole_dom = _sole_dominant_in_full_yarn(full_by_color, exact_color_terms or set())
     closeness = _closeness_band(

@@ -24,12 +24,52 @@ CM_PER_FT = 30.48
 CM_PER_IN = 2.54
 CM_SIZE_TOLERANCE = 8
 
-# Approximate area (sq ft) buckets when users say small / medium / large / oversize.
+# Website SizeGroup chips (/in/rugs SIZE ft filters) for bucket words.
+# Medium is site chips 5×8 / 6×9 / 8×10 — NOT invented sqft bands
+# (legacy 48–120 sqft wrongly classified 5×8 = 40 sqft as small).
+SIZE_CATEGORY_SIZE_GROUPS: dict[str, frozenset[str]] = {
+    "small": frozenset({
+        "2x3",
+        "3x5",
+        "4x6",
+        "3x3",
+        "4x4",
+        "5x5",
+        "3diaround",
+        "4diaround",
+        "5diaround",
+    }),
+    "medium": frozenset({
+        "5x8",
+        "6x9",
+        "8x10",
+        "6x6",
+        "7x7",
+        "6diaround",
+        "7diaround",
+        "8diaround",
+    }),
+    "large": frozenset({
+        "9x12",
+        "10x14",
+        "9x9",
+        "9diaround",
+        "10diaround",
+    }),
+    "oversize": frozenset({
+        "12x15",
+        "12x12",
+        "12diaround",
+    }),
+}
+
+# Last-resort area bands only when SizeGroup / SizeInFT chips are absent.
+# Kept for odd catalog rows; primary match is SIZE_CATEGORY_SIZE_GROUPS.
 SIZE_CATEGORY_SQFT_RANGES: dict[str, tuple[float, float]] = {
-    "small": (0.0, 48.0),
-    "medium": (48.0, 120.0),
-    "large": (120.0, 210.0),
-    "oversize": (210.0, float("inf")),
+    "small": (0.0, 40.0),
+    "medium": (40.0, 90.0),
+    "large": (90.0, 160.0),
+    "oversize": (160.0, float("inf")),
 }
 
 FT_INCH_DIM = re.compile(
@@ -239,27 +279,60 @@ def product_matches_size_term(product: dict, term: str) -> bool:
     return False
 
 
+def _chip_key_to_term(chip_key: str) -> str:
+    """Turn normalized chip keys back into matchable size terms."""
+    key = (chip_key or "").strip().lower()
+    dia = re.fullmatch(r"(\d+(?:\.\d+)?)diaround", key)
+    if dia:
+        return f"{dia.group(1)} dia round"
+    round_m = re.fullmatch(r"(\d+(?:\.\d+)?)round", key)
+    if round_m:
+        return f"{round_m.group(1)} round"
+    return key
+
+
 def product_matches_size_category(product: dict, category: str) -> bool:
-    """Match catalog size buckets (small/medium/large/oversize) by rug area."""
+    """Match small/medium/large/oversize via website SizeGroup chips (not sqft-first)."""
     cat = (category or "").lower().strip()
-    bounds = SIZE_CATEGORY_SQFT_RANGES.get(cat)
-    if not bounds:
+    chips = SIZE_CATEGORY_SIZE_GROUPS.get(cat)
+    if not chips:
         return False
 
-    # Site "Oversize Rugs" SizeGroup chip — prefer label over sqft alone.
+    # Site "Oversize Rugs" SizeGroup chip — label beats chip set / sqft.
     if cat == "oversize":
         size_group = str(product.get("SizeGroupInFT") or "").lower()
         if "oversize" in size_group:
             return True
 
-    for field in ("SizeInFT", "SizeGroupInFT"):
+    for field in ("SizeGroupInFT", "SizeGroupInCM"):
+        group = str(product.get(field) or "").strip()
+        if not group:
+            continue
+        group_key = normalize_size_group_token(group)
+        if group_key in chips:
+            return True
+        for chip in chips:
+            if size_group_matches_term(group, _chip_key_to_term(chip)):
+                return True
+
+    # SizeInFT / SizeInCM that resolve to a chip in this bucket (e.g. 5'0x8'0 → 5x8).
+    for chip in chips:
+        if product_matches_size_term(product, _chip_key_to_term(chip)):
+            return True
+
+    # Last resort: area band when catalog has no usable SizeGroup / size chip.
+    has_group = bool(
+        str(product.get("SizeGroupInFT") or "").strip()
+        or str(product.get("SizeGroupInCM") or "").strip()
+    )
+    if has_group:
+        return False
+    bounds = SIZE_CATEGORY_SQFT_RANGES.get(cat)
+    if not bounds:
+        return False
+    for field in ("SizeInFT",):
         sqft = product_sqft_from_ft_field(str(product.get(field) or ""))
         if sqft is not None:
             lo, hi = bounds
             return lo <= sqft < hi
-
-    haystack = " ".join(
-        str(product.get(field) or "")
-        for field in ("DisplayFilter", "SizeInFT", "SizeGroupInFT", "MultiFilter")
-    ).lower()
-    return bool(re.search(rf"\b{re.escape(cat)}\b", haystack))
+    return False

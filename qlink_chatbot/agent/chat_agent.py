@@ -39,6 +39,7 @@ from qlink_chatbot.utils.product_format import (
 )
 from qlink_chatbot.utils.search_session import (
     SEARCH_PAGE_SIZE,
+    ensure_search_honesty_prefix,
     latest_search_has_results,
 )
 from qlink_chatbot.utils.search_trace import log_search_turn
@@ -1539,6 +1540,11 @@ async def chat_agent(
 
         output = json.loads(response.output[0].content[0].text)
         final_message = output.get("message", "")
+        # Don't rely on the model to surface relax honesty — prefix once.
+        if isinstance(last_product_search_result, list) and last_product_search_result:
+            final_message = ensure_search_honesty_prefix(
+                final_message, last_product_search_result
+            )
         _ensure_unknown_query_alert(
             session_id,
             user_message,

@@ -18,7 +18,6 @@ from qlink_chatbot.utils.jr_search_aliases import (
     ROUND_SIZE_PATTERN,
     WEIGHT_PATTERN,
     color_search_terms,
-    color_match_is_strict,
     normalise_catalog_tag,
     COLOR_FAMILY_FIELDS,
     COLOR_MATCH_FIELDS,
@@ -240,14 +239,13 @@ def segment_to_mongo_clause(segment: str, *, mixture_mode: bool = False) -> dict
         clauses.append({"search_tokens": {"$in": unique_tokens}})
         clauses.extend(_regex_or_clauses(COLOR_RAW_FIELDS, unique_tokens))
         clauses.extend(_regex_or_clauses(("raw.DisplayFilter",), unique_tokens))
-        # ColorFamily: mixture intent (pink&purple) and non-strict palettes.
-        # Strict single pink/red keeps ColorFamily out so "Pink and Purple" isn't recalled.
-        if mixture_mode or not color_match_is_strict(set(unique_tokens)):
-            clauses.extend(_regex_or_clauses(COLOR_FAMILY_RAW_FIELDS, unique_tokens))
+        # Site chips use ColorFamily (e.g. "Red and Orange" for red). Always
+        # recall it; nearest-first ranking keeps pure GrColor above soft family.
+        clauses.extend(_regex_or_clauses(COLOR_FAMILY_RAW_FIELDS, unique_tokens))
         logger.info(
             f"[MONGO] color catalog clause tokens={unique_tokens} "
             f"mixture_mode={mixture_mode} "
-            "(GrColor/DisplayFilter/tokens; breakdown not used for recall)"
+            "(GrColor/DisplayFilter/ColorFamily/tokens; breakdown not used for recall)"
         )
     elif segment_type == "pattern":
         unique_tokens = list(dict.fromkeys(tokens))
@@ -365,10 +363,11 @@ def product_matches_color_family_terms(product: dict, terms: set[str]) -> bool:
 
 
 def product_matches_single_color_family(product: dict, terms: set[str]) -> bool:
-    """ColorFamily hit for single-color intent — reject mixture families like 'Pink and Purple'."""
-    family = str(product.get("ColorFamily") or "").strip()
-    if re.search(r"\band\b", family, re.IGNORECASE):
-        return False
+    """ColorFamily / soft-label hit for single-color intent (site-chip style).
+
+    Accepts families like 'Red and Orange' for red. Ranking demotes these below
+    pure GrColor matches; do not blanket-reject 'X and Y' site families.
+    """
     return product_matches_color_family_terms(product, terms)
 
 
@@ -378,12 +377,10 @@ def product_matches_color_terms(
     *,
     mixture_mode: bool = False,
 ) -> bool:
-    """Match on ground color (GrColor/DisplayFilter) and, for broad/mixture, ColorFamily."""
+    """Match GrColor/DisplayFilter, or ColorFamily soft labels (site chips)."""
     if product_matches_catalog_color(product, terms):
         return True
-    if mixture_mode or not color_match_is_strict(terms):
-        return product_matches_color_family_terms(product, terms)
-    return False
+    return product_matches_color_family_terms(product, terms)
 
 
 def product_matches_mixture_colors(
@@ -985,56 +982,60 @@ def apply_search_pipeline(
             else:
                 return [], None, meta
         else:
-            # Single-color: catalog labels first, yarn % only as last fallback.
+            # Single-color: union GrColor/DisplayFilter + ColorFamily (site chips).
+            # Nearest-first ranking keeps pure GrColor above soft family labels.
             catalog_exact = [
                 p for p in unique_results
                 if product_matches_catalog_color(p, match_terms)
             ]
-            if catalog_exact:
-                logger.info(
-                    f"[SEARCH] exact catalog color filter: {len(unique_results)} → "
-                    f"{len(catalog_exact)} (terms={sorted(match_terms)})"
-                )
-                unique_results = catalog_exact
-                color_search_tier = "exact_catalog_color"
-            else:
-                family_filtered = [
-                    p for p in unique_results
-                    if product_matches_single_color_family(p, match_terms)
-                ]
-                if family_filtered:
+            family_filtered = [
+                p for p in unique_results
+                if product_matches_single_color_family(p, match_terms)
+            ]
+            if catalog_exact or family_filtered:
+                merged: dict[str, dict] = {}
+                for p in catalog_exact + family_filtered:
+                    key = str(p.get("SKU") or p.get("BarCode") or id(p))
+                    merged.setdefault(key, p)
+                unique_results = list(merged.values())
+                if catalog_exact:
+                    color_search_tier = "exact_catalog_color"
                     logger.info(
-                        f"[SEARCH] similar catalog color (non-mixture ColorFamily) filter: "
-                        f"{len(unique_results)} → {len(family_filtered)} "
-                        f"(terms={sorted(match_terms)})"
+                        f"[SEARCH] catalog+family color filter: {len(merged)} "
+                        f"(grcolor/display={len(catalog_exact)} "
+                        f"family={len(family_filtered)} terms={sorted(match_terms)})"
                     )
-                    unique_results = family_filtered
-                    color_search_tier = "similar_catalog_color"
                 else:
-                    skus = [
-                        str(p.get("SKU") or p.get("BarCode") or "").strip()
-                        for p in unique_results
-                    ]
-                    breakdown_by_sku = load_breakdowns_for_skus([s for s in skus if s])
-                    breakdown_colors = user_terms_to_breakdown_colors(
-                        exact_color_terms or match_terms
+                    color_search_tier = "similar_catalog_color"
+                    logger.info(
+                        f"[SEARCH] similar catalog color (ColorFamily) filter: "
+                        f"{len(family_filtered)} (terms={sorted(match_terms)})"
                     )
-                    breakdown_filtered = [
-                        p for p in unique_results
-                        if breakdown_colors
-                        and product_matches_color_breakdown(
-                            p, breakdown_colors, breakdown_by_sku,
-                        )
-                    ] if breakdown_colors else []
-                    if breakdown_filtered:
-                        logger.info(
-                            f"[SEARCH] breakdown fallback filter: {len(unique_results)} → "
-                            f"{len(breakdown_filtered)} (colors={sorted(breakdown_colors)})"
-                        )
-                        unique_results = breakdown_filtered
-                        color_search_tier = "breakdown_fallback"
-                    else:
-                        return [], None, meta
+            else:
+                skus = [
+                    str(p.get("SKU") or p.get("BarCode") or "").strip()
+                    for p in unique_results
+                ]
+                breakdown_by_sku = load_breakdowns_for_skus([s for s in skus if s])
+                breakdown_colors = user_terms_to_breakdown_colors(
+                    exact_color_terms or match_terms
+                )
+                breakdown_filtered = [
+                    p for p in unique_results
+                    if breakdown_colors
+                    and product_matches_color_breakdown(
+                        p, breakdown_colors, breakdown_by_sku,
+                    )
+                ] if breakdown_colors else []
+                if breakdown_filtered:
+                    logger.info(
+                        f"[SEARCH] breakdown fallback filter: {len(unique_results)} → "
+                        f"{len(breakdown_filtered)} (colors={sorted(breakdown_colors)})"
+                    )
+                    unique_results = breakdown_filtered
+                    color_search_tier = "breakdown_fallback"
+                else:
+                    return [], None, meta
 
     # Non-size attrs first (hard size applied next with optional relax).
     color_pool = unique_results

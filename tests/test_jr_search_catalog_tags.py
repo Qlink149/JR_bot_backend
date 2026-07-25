@@ -123,6 +123,41 @@ def test_oversize_size_category_uses_size_group():
     assert product_matches_size_category(product, "oversize")
 
 
+def test_medium_size_category_uses_website_chips():
+    """Site medium ≈ 5×8 / 6×9 / 8×10 — 5×8 must NOT be small (legacy sqft bug)."""
+    five_by_eight = _rug(SizeInFT="5'0x8'0", SizeGroupInFT="5X8")
+    assert product_matches_size_category(five_by_eight, "medium")
+    assert not product_matches_size_category(five_by_eight, "small")
+
+    for group in ("6X9", "8X10"):
+        rug = _rug(SizeInFT="", SizeGroupInFT=group)
+        assert product_matches_size_category(rug, "medium"), group
+        assert not product_matches_size_category(rug, "small"), group
+        assert not product_matches_size_category(rug, "large"), group
+
+    # Medium dia rounds (site chips adjacent to 5×8–8×10).
+    six_round = _rug(SizeInFT="", SizeGroupInFT="6 Dia Round")
+    assert product_matches_size_category(six_round, "medium")
+    assert not product_matches_size_category(six_round, "small")
+
+
+def test_small_large_size_category_chips():
+    four_by_six = _rug(SizeInFT="4x6", SizeGroupInFT="4X6")
+    assert product_matches_size_category(four_by_six, "small")
+    assert not product_matches_size_category(four_by_six, "medium")
+
+    nine_by_twelve = _rug(SizeInFT="9x12", SizeGroupInFT="9X12")
+    assert product_matches_size_category(nine_by_twelve, "large")
+    assert not product_matches_size_category(nine_by_twelve, "medium")
+
+
+def test_medium_matches_size_in_ft_when_group_missing():
+    """Chip match via SizeInFT when SizeGroupInFT is empty."""
+    rug = _rug(SizeInFT="5'0x8'0", SizeGroupInFT="")
+    assert product_matches_size_category(rug, "medium")
+    assert not product_matches_size_category(rug, "small")
+
+
 def test_shag_in_construction_keywords():
     assert "shag" in CONSTRUCTION_KEYWORDS
     _pf, clean, _c, attrs = normalise_keyword("shag rugs")

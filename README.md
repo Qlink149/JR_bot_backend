@@ -59,6 +59,39 @@ On the Vultr host, schedule daily:
 0 0 * * * CRON_SECRET=... /usr/local/bin/vultr-cron-sync-products.sh
 ```
 
+### Diagnose bot vs website (local, ~1 min)
+
+When the bot returns the “wrong” rugs vs jaipurrugs.com, don’t guess — run:
+
+```bash
+# Website shows a rug the bot missed — is it in Mongo / Product Master?
+python scripts/diagnose_catalog.py --find "laal chattan"
+python scripts/diagnose_catalog.py --find "PAE-5080-0001" --full-api
+
+# Replay the user message (same extract → Mongo → relax path)
+python scripts/diagnose_catalog.py --query "show me red rugs above 15000 usd and below 20000 usd round shape"
+
+# Prove a known SKU should have matched
+python scripts/diagnose_catalog.py --query "red round above 15000 usd" --expect-sku PAE-5080-0001
+```
+
+Verdicts:
+
+| Tag | Meaning | What to tell the client |
+| --- | --- | --- |
+| `API_GAP` | Not in JR Product Master API | Website CMS ≠ API feed; JR must expose the SKU |
+| `API_YES_MONGO_NO` | In API, missing in Mongo | We need a catalog sync |
+| `LOGIC` | In Mongo, filters/ranking miss it | Our search bug (color/shape/medium/etc.) |
+| `OK` | Expected SKU returned | Behavior is correct |
+
+### Golden search suite (no Mongo / OpenAI)
+
+```bash
+python -m pytest tests/test_jr_search_golden_queries.py -q
+```
+
+Covers soft new arrival, aurelia+red, red+round+USD (PAE-5080-class ColorFamily), medium/5×8, show-more, Hindi color, bleed, and single honesty note.
+
 ## Local Development
 
 ```bash

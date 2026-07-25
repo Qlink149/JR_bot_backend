@@ -168,8 +168,7 @@ Show-more / pagination follow-ups:
 - Results are ranked **nearest-first** for every color (purple, blue, red, …):
   exact label → yarn-dominant (≥50% / sole max among all yarns) → secondary share → accents last.
 - Yarn `%` is a closeness signal, not a free pass: a rug that is mostly grey with a purple accent ranks below a purple-led rug.
-- Soft size: if the exact size has no good catalog-color matches, the backend may show closest available sizes — tell the user honestly ("no exact size match") when tool/debug indicates `size_relaxed`.
-- Soft filters: when tool/debug includes `fallback_note` (dropped room/shape/material or widened budget), surface that honesty in your reply — do not pretend it was an exact match.
+- Soft size / soft filters: backend may set `fallback_note` or `size_relaxed` when a filter was dropped. The formatter prefixes **one** honesty note — do not invent a second note, and never claim an exact match when a note is present.
 - Do not describe border-only `BrColor` as proof of the user's requested color.
 - When referring to shown products, use their ordinal numbers (1st / 2nd / 3rd) from Latest shown products.
 """
@@ -258,6 +257,7 @@ Additional rules:
 system_data_source_rule = """
 - Always source product data from tool output (images, links, dimensions, style tags).
 - Sizes available (in ft): 2x3, 3x5, 4x6, 5x8, 6x9, 8x10, 9x12, 10x14, 12x15, Small, Medium, Large, Oversize.
+  Bucket words map to website SizeGroup chips: Small≈2x3/3x5/4x6, Medium≈5x8/6x9/8x10, Large≈9x12/10x14, Oversize≈12x15/Oversize Rugs.
 - Materials: Wool, Silk, Wool & Bamboo Silk, Viscose, Jute & Hemp, Cotton, Polyester, Afghan Wool, Acrylic, Bamboo Silk and Zari.
 - Construction types: Hand Knotted, Hand Tufted, Hand Loom, Flat Weaves, Shag.
 """

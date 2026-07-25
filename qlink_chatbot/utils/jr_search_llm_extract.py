@@ -20,11 +20,13 @@ from qlink_chatbot.utils.jr_search_aliases import (
     CATALOG_TAG_KEYS,
     COLOR_ALIASES,
     CONSTRUCTION_KEYWORDS,
+    HINGLISH_COLOR_ALIASES,
     MATERIAL_KEYWORDS,
     PATTERN_ALIASES,
     ROOM_KEYWORDS,
     SHAPE_ALIASES,
     SIZE_CATEGORIES,
+    canonical_color_key,
     normalise_catalog_tag,
     normalise_size_category,
     SIZE_PATTERN,
@@ -89,7 +91,11 @@ SEARCH_EXTRACTION_SCHEMA = {
                 "size_categories": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Catalog size bucket: small, medium, large, or oversize.",
+                    "description": (
+                        "Catalog size bucket word only: small, medium, large, or oversize. "
+                        "Website chips: medium≈5x8/6x9/8x10; small≈2x3/3x5/4x6; "
+                        "large≈9x12/10x14; oversize≈12x15. Exact dims go in sizes_ft."
+                    ),
                 },
                 "materials": {"type": "array", "items": {"type": "string"}},
                 "constructions": {"type": "array", "items": {"type": "string"}},
@@ -334,6 +340,56 @@ def resolved_keyword_for_memory(
     return (llm_debug.get("merged_keyword") or keyword or "").strip()
 
 
+def _token_evidenced_in_text(token: str, text: str) -> bool:
+    """True when token appears in user text (ASCII word-boundary or substring)."""
+    raw = (token or "").strip()
+    if not raw or not (text or "").strip():
+        return False
+    hay = text.strip()
+    lower = hay.lower()
+    key = raw.lower()
+    if raw.isascii() and key.isascii():
+        return bool(re.search(rf"\b{re.escape(key)}\b", lower))
+    return raw in hay or key in lower
+
+
+def _color_evidenced_in_text(color: str, text: str) -> bool:
+    if _token_evidenced_in_text(color, text):
+        return True
+    # Hinglish source word that maps to this English catalog color.
+    for hinglish, eng in HINGLISH_COLOR_ALIASES.items():
+        if eng == (color or "").strip().lower() and _token_evidenced_in_text(hinglish, text):
+            return True
+    return False
+
+
+def _shape_evidenced_in_text(shape: str, text: str) -> bool:
+    key = (shape or "").strip().lower()
+    if not key:
+        return False
+    if _token_evidenced_in_text(key, text):
+        return True
+    catalog = str(SHAPE_ALIASES.get(key) or "").strip().lower()
+    # Any alias that maps to the same catalog shape (gol → Round ← round).
+    for alias, value in SHAPE_ALIASES.items():
+        if str(value).strip().lower() == (catalog or key) and _token_evidenced_in_text(alias, text):
+            return True
+    return False
+
+
+def _catalog_tag_evidenced_in_text(tag: str, text: str) -> bool:
+    key = (tag or "").strip().lower()
+    if not key:
+        return False
+    if _token_evidenced_in_text(key, text):
+        return True
+    lower = (text or "").lower()
+    for alias, canonical in CATALOG_TAG_ALIASES.items():
+        if canonical == key and alias in lower:
+            return True
+    return False
+
+
 def _sanitize_attrs_to_current_message(
     attrs: dict,
     *,
@@ -343,22 +399,40 @@ def _sanitize_attrs_to_current_message(
 ) -> dict:
     """Drop previous-search / polluted tool-keyword bleed; keep current ask only.
 
-    When trust_llm=True (llm_primary), keep the LLM's validated attributes and
-    only clear fields that look like prior-turn bleed relative to the user text
-    via a light user-message-only backfill merge — never wipe LLM catalog_tags
-    / collection / colors that regex failed to see (soft phrasing).
+    Evidence gate: only keep LLM attrs evidenced in the current user message
+    (or recovered via user-message regex backfill). Soft catalog phrases like
+    "is there any new arrival" still keep catalog_tags when alias text matches.
     """
     current = (user_message or keyword or "").strip()
     if trust_llm:
         out = dict(attrs)
         out["refinement"] = "new"
-        # Prefer LLM values; optionally add anything regex sees in the user text.
         out, notes = backfill_attrs_from_regex(
             out,
             keyword="",
             user_message=current,
             user_message_only=True,
         )
+        # Strip bled attrs the LLM kept from prior context despite soft ask.
+        out["colors"] = [c for c in (out.get("colors") or []) if _color_evidenced_in_text(c, current)]
+        out["shapes"] = [s for s in (out.get("shapes") or []) if _shape_evidenced_in_text(s, current)]
+        out["sizes_ft"] = [s for s in (out.get("sizes_ft") or []) if _token_evidenced_in_text(s, current)]
+        out["sizes_cm"] = [s for s in (out.get("sizes_cm") or []) if _token_evidenced_in_text(s, current)]
+        out["size_categories"] = [
+            c for c in (out.get("size_categories") or []) if _token_evidenced_in_text(c, current)
+        ]
+        out["materials"] = [m for m in (out.get("materials") or []) if _token_evidenced_in_text(m, current)]
+        out["constructions"] = [
+            c for c in (out.get("constructions") or []) if _token_evidenced_in_text(c, current)
+        ]
+        out["patterns"] = [p for p in (out.get("patterns") or []) if _token_evidenced_in_text(p, current)]
+        out["rooms"] = [r for r in (out.get("rooms") or []) if _token_evidenced_in_text(r, current)]
+        out["catalog_tags"] = [
+            t for t in (out.get("catalog_tags") or []) if _catalog_tag_evidenced_in_text(t, current)
+        ]
+        coll = (out.get("collection") or "").strip()
+        if coll and not _token_evidenced_in_text(coll, current):
+            out["collection"] = None
         if notes:
             logger.info(f"[LLM-EXTRACT] trust_llm fresh-search merge: {notes}")
         return out
@@ -388,45 +462,51 @@ def _sanitize_attrs_to_current_message(
         user_message=current,
         user_message_only=True,
     )
-    # Keep LLM catalog_tags / collection / colors even when regex is blind.
+    # Merge LLM attrs only when evidenced in the current user message.
     for tag in attrs.get("catalog_tags") or []:
-        if tag not in clean["catalog_tags"]:
+        if tag not in clean["catalog_tags"] and _catalog_tag_evidenced_in_text(tag, current):
             clean["catalog_tags"].append(tag)
-    if attrs.get("collection") and not clean.get("collection"):
-        clean["collection"] = attrs["collection"]
+    coll = (attrs.get("collection") or "").strip()
+    if coll and not clean.get("collection") and _token_evidenced_in_text(coll, current):
+        clean["collection"] = coll
     for color in attrs.get("colors") or []:
-        if color not in clean["colors"]:
+        if color not in clean["colors"] and _color_evidenced_in_text(color, current):
             clean["colors"].append(color)
     for shape in attrs.get("shapes") or []:
-        if shape not in clean["shapes"]:
+        if shape not in clean["shapes"] and _shape_evidenced_in_text(shape, current):
             clean["shapes"].append(shape)
     for room in attrs.get("rooms") or []:
-        if room not in clean["rooms"]:
+        if room not in clean["rooms"] and _token_evidenced_in_text(room, current):
             clean["rooms"].append(room)
     for size in attrs.get("sizes_ft") or []:
-        if size not in clean["sizes_ft"]:
+        if size not in clean["sizes_ft"] and _token_evidenced_in_text(size, current):
             clean["sizes_ft"].append(size)
     for size in attrs.get("sizes_cm") or []:
-        if size not in clean["sizes_cm"]:
+        if size not in clean["sizes_cm"] and _token_evidenced_in_text(size, current):
             clean["sizes_cm"].append(size)
     for cat in attrs.get("size_categories") or []:
-        if cat not in clean["size_categories"]:
+        if cat not in clean["size_categories"] and _token_evidenced_in_text(cat, current):
             clean["size_categories"].append(cat)
     for material in attrs.get("materials") or []:
-        if material not in clean["materials"]:
+        if material not in clean["materials"] and _token_evidenced_in_text(material, current):
             clean["materials"].append(material)
     for construction in attrs.get("constructions") or []:
-        if construction not in clean["constructions"]:
+        if construction not in clean["constructions"] and _token_evidenced_in_text(
+            construction, current
+        ):
             clean["constructions"].append(construction)
     for pattern in attrs.get("patterns") or []:
-        if pattern not in clean["patterns"]:
+        if pattern not in clean["patterns"] and _token_evidenced_in_text(pattern, current):
             clean["patterns"].append(pattern)
-    if attrs.get("sku") and not clean.get("sku"):
-        clean["sku"] = attrs["sku"]
-    if attrs.get("multicolor"):
+    sku = (attrs.get("sku") or "").strip()
+    if sku and not clean.get("sku") and _token_evidenced_in_text(sku, current):
+        clean["sku"] = sku
+    if attrs.get("multicolor") and _token_evidenced_in_text("multicolor", current):
         clean["multicolor"] = True
     if attrs.get("weight_max_kg") and not clean.get("weight_max_kg"):
-        clean["weight_max_kg"] = attrs["weight_max_kg"]
+        # Weight usually comes from regex backfill; keep LLM only if "kg" mentioned.
+        if re.search(r"\b\d+(?:\.\d+)?\s*kg\b", current.lower()):
+            clean["weight_max_kg"] = attrs["weight_max_kg"]
 
     # Preserve price when the current message has budget intent.
     if attrs.get("price") and _source_has_price_intent(current):
@@ -799,16 +879,21 @@ def validate_extracted_attributes(
     }
 
     for c in raw.get("colors") or []:
-        key = _COLOR_KEYS_LOWER.get((c or "").strip().lower())
+        key = canonical_color_key(c) or _COLOR_KEYS_LOWER.get((c or "").strip().lower())
         if key and key not in out["colors"]:
             out["colors"].append(key)
         elif c:
             dropped.append(f"color:{c}")
 
     for s in raw.get("shapes") or []:
-        key = _SHAPE_KEYS_LOWER.get((s or "").strip().lower())
-        if key and key not in out["shapes"]:
-            out["shapes"].append(key)
+        lower = (s or "").strip().lower()
+        key = _SHAPE_KEYS_LOWER.get(lower)
+        if key:
+            # Canonicalize aliases (gol/circular → round) via catalog value.
+            catalog = str(SHAPE_ALIASES.get(key) or key).strip().lower()
+            canonical = catalog if catalog in SHAPE_ALIASES else key
+            if canonical not in out["shapes"]:
+                out["shapes"].append(canonical)
         elif s:
             dropped.append(f"shape:{s}")
 
@@ -938,7 +1023,7 @@ def attributes_to_catalog_keyword(attrs: dict) -> str:
         segments.append(room)
     for tag in attrs.get("catalog_tags") or []:
         segments.append(tag)
-    # size_categories stay in attribute_filters only (sqft / SizeGroup post-filter).
+    # size_categories stay in attribute_filters only (SizeGroup chip post-filter).
     if attrs.get("multicolor"):
         segments.append("multicolor")
     weight = attrs.get("weight_max_kg")
@@ -1086,6 +1171,12 @@ SIZE RULES
 - Foot dimensions → sizes_ft (normalize * × by / - to ascii x). Never put 8x10 in size_categories.
 - "6 dia round" / "8' round" → sizes_ft + shapes=["round"].
 - size_categories only for bucket words: small, medium, large, oversize.
+  Website SizeGroup mapping (do NOT invent other dims for buckets):
+  small ≈ 2x3 / 3x5 / 4x6 (+ small dia rounds);
+  medium ≈ 5x8 / 6x9 / 8x10 (+ 6–8 dia rounds);
+  large ≈ 9x12 / 10x14;
+  oversize ≈ 12x15 / Oversize Rugs.
+  If the user says both a bucket and an exact chip ("medium 5x8"), keep both size_categories and sizes_ft.
 - CM dimensions → sizes_cm.
 - Do NOT treat "range of size" as a price range.
 

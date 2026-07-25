@@ -84,12 +84,19 @@ def build_search_tokens(product: dict) -> list[str]:
     if re.search(r"\b(multi|multicolor|multicolour)\b", display_filter):
         tokens.update({"multi", "multicolor", "multicolour"})
 
-    # Avoid broad tokens like "red" from "Red and Orange" family labels.
+    # Site ColorFamily chips (incl. "Red and Orange") — index label + each
+    # constituent so primary-color recall matches website filters. Ranking
+    # keeps pure GrColor above soft family hits.
     color_family = (product.get("ColorFamily") or "").strip()
-    if color_family and " and " not in color_family.lower():
-        add(color_family)
-    if color_family.lower() == "multi":
-        tokens.update({"multi", "multicolor", "multicolour"})
+    if color_family:
+        if color_family.lower() == "multi":
+            tokens.update({"multi", "multicolor", "multicolour"})
+        else:
+            add(color_family)
+            for part in re.split(r"\s+and\s+", color_family, flags=re.IGNORECASE):
+                part = part.strip()
+                if part:
+                    add(part)
 
     for field in _NON_COLOR_TOKEN_FIELDS:
         add(product.get(field))

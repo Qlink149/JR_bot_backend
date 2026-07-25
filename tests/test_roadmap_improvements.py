@@ -17,8 +17,10 @@ from qlink_chatbot.routes.whatsapp_routes import _format_products_for_whatsapp
 from qlink_chatbot.utils.product_format import format_product_search_message
 from qlink_chatbot.utils.search_session import (
     build_search_intro,
+    ensure_search_honesty_prefix,
     filter_fresh_searches,
     latest_search_has_results,
+    products_honesty_note,
 )
 from qlink_chatbot.utils.whatsapp_guards import (
     is_inbound_rate_limited,
@@ -34,6 +36,39 @@ def test_size_relaxed_intro_disclosed():
     msg = format_product_search_message(products)
     assert "1. Abrash" in msg or "**1. Abrash**" in msg
     assert "exact size" in msg.lower()
+
+
+def test_single_honesty_note_prefers_fallback_over_size_relaxed():
+    """Kisna-style: one note only — progressive fallback_note wins over size line."""
+    products = [{
+        "name": "Abrash",
+        "size_relaxed": True,
+        "fallback_note": (
+            "No rugs matched that shape with your other filters — showing other shapes."
+        ),
+        "display_price": "INR 1",
+    }]
+    intro = build_search_intro(products=products)
+    assert "showing other shapes" in intro.lower()
+    assert "closest available sizes" not in intro.lower()
+    assert intro.lower().count("\n\n") == 1  # base + one note, not stacked notes
+    msg = format_product_search_message(products)
+    assert "showing other shapes" in msg.lower()
+    assert "closest available sizes" not in msg.lower()
+
+
+def test_ensure_search_honesty_prefix_for_web_llm_path():
+    products = [{
+        "fallback_note": "Broadened search by dropping the room filter.",
+    }]
+    raw = "**1. Abrash**\n- Size: 8x10"
+    out = ensure_search_honesty_prefix(raw, products)
+    assert out.startswith("Broadened search by dropping the room filter.")
+    assert "**1. Abrash**" in out
+    # Idempotent — do not stack if note already present.
+    again = ensure_search_honesty_prefix(out, products)
+    assert again.count("Broadened search by dropping the room filter.") == 1
+    assert "exact size" in products_honesty_note([{"size_relaxed": True}]).lower()
 
 
 def test_empty_latest_search_blocks_followup_context():

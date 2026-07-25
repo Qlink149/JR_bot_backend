@@ -23,6 +23,7 @@ from qlink_chatbot.utils.support_contacts import (
 )
 from qlink_chatbot.utils.search_session import (
     build_search_intro,
+    products_honesty_note,
     products_have_size_relaxed,
 )
 from qlink_chatbot.utils.search_trace import log_search_turn
@@ -468,11 +469,9 @@ async def _process_message(request_data: dict) -> None:
             # blocks (including broken ![Rug Image] lines) into the text reply.
             if product_cards_sent:
                 wa_text = _whatsapp_text_after_product_cards(ai_text or "")
-                if products_have_size_relaxed(latest_products):
-                    disclose = build_search_intro(products=latest_products)
-                    # Prefer honest size/filter note over generic AI first paragraph.
-                    if "exact size" in disclose.lower() or "broadened" in disclose.lower():
-                        wa_text = disclose
+                # Always surface the single honesty note when search was relaxed.
+                if products_honesty_note(latest_products):
+                    wa_text = build_search_intro(products=latest_products)
             else:
                 wa_text = _markdown_to_whatsapp(ai_text or "")
             if wa_text:

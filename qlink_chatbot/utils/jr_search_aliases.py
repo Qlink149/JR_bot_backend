@@ -126,10 +126,40 @@ COLOR_ALIASES: dict[str, str] = {
     "turquoise": "Turquoise||Teal||Cyan||Blue",
 }
 
+# Hinglish / Hindi color words → English catalog keys (LLM prompt + regex path).
+HINGLISH_COLOR_ALIASES: dict[str, str] = {
+    "laal": "red",
+    "लाल": "red",
+    "neela": "blue",
+    "nila": "blue",
+    "नीला": "blue",
+    "baingani": "purple",
+    "bainganii": "purple",
+    "बैंगनी": "purple",
+    "safed": "white",
+    "सफेद": "white",
+    "kala": "black",
+    "काला": "black",
+}
+
+
+def canonical_color_key(term: str) -> str | None:
+    """Map English or Hinglish color word to a COLOR_ALIASES key."""
+    key = (term or "").strip().lower()
+    if not key:
+        return None
+    mapped = HINGLISH_COLOR_ALIASES.get(key) or HINGLISH_COLOR_ALIASES.get((term or "").strip())
+    if mapped:
+        key = mapped
+    if key in COLOR_ALIASES:
+        return key
+    return None
+
 SHAPE_ALIASES: dict[str, str] = {
     "round": "Round",
     "circular": "Round",
     "circle": "Round",
+    "gol": "Round",  # Hinglish
     "oval": "Oval",
     "square": "Square",
     "runner": "Runner",
@@ -224,7 +254,8 @@ def collect_known_catalog_values() -> tuple[set[str], set[str]]:
 KNOWN_COLOR_VALUES, KNOWN_PATTERN_VALUES = collect_known_catalog_values()
 KNOWN_SHAPE_VALUES = {k.lower() for k in SHAPE_ALIASES} | {v.lower() for v in SHAPE_ALIASES.values()}
 
-# Post-filter and indexed query use only the user's term for these colors.
+# These colors do not expand via COLOR_ALIASES synonyms in search terms
+# (user word only). ColorFamily soft chips are still recalled separately.
 STRICT_COLOR_KEYS = frozenset({"pink", "red"})
 
 COLOR_MATCH_FIELDS = ("GrColor",)
@@ -232,6 +263,7 @@ COLOR_FAMILY_FIELDS = ("ColorFamily", "DisplayFilter", "ColorMood", "BasicColor"
 
 
 def color_match_is_strict(terms: set[str]) -> bool:
+    """True when every term is a non-expanding primary color key (pink/red)."""
     return bool(terms) and terms <= STRICT_COLOR_KEYS
 
 

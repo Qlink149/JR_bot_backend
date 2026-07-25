@@ -459,8 +459,6 @@ async def jaipur_rugs_product_search(
                 working_keyword = _apply_drop_to_keyword(
                     working_keyword, drop_key, values
                 )
-                if drop_key == "size_category":
-                    size_relaxed = True
                 if working_keyword:
                     raw_fb, color_pre_fb = await asyncio.to_thread(
                         mongo_search_products,
@@ -485,6 +483,8 @@ async def jaipur_rugs_product_search(
                     effective_filters = working_filters
                     effective_keyword = working_keyword
                     effective_price = working_price
+                    if drop_key == "size_category":
+                        size_relaxed = True
                     logger.info(
                         f"[SEARCH] progressive fallback dropped={drop_key} "
                         f"n={len(unique_results)}"

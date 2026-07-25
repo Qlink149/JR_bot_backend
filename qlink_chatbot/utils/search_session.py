@@ -76,20 +76,57 @@ def products_fallback_note(products: list | None) -> str:
     return ""
 
 
+SIZE_RELAXED_NOTE = "No exact size match — showing closest available sizes."
+
+
+def products_honesty_note(products: list | None) -> str:
+    """Single honesty note (no intro base), or empty when search was exact."""
+    fallback = products_fallback_note(products)
+    if fallback:
+        return fallback
+    if products_have_size_relaxed(products):
+        return SIZE_RELAXED_NOTE
+    return ""
+
+
 def build_search_intro(
     *,
     products: list | None,
     default: str = "Here are some rugs I found for you:",
     more: bool = False,
 ) -> str:
-    """Honest intro when size/filter relaxations applied."""
+    """Honest intro when size/filter relaxations applied.
+
+    Kisna-style: one clear note only. Prefer the progressive fallback_note;
+    fall back to the size-relax line when that is the only signal.
+    """
     base = "Here are more rugs I found for you:" if more else default
-    notes: list[str] = []
-    if products_have_size_relaxed(products):
-        notes.append("No exact size match — showing closest available sizes.")
-    fallback = products_fallback_note(products)
-    if fallback:
-        notes.append(fallback)
-    if not notes:
-        return base
-    return f"{base}\n\n" + " ".join(notes)
+    note = products_honesty_note(products)
+    if note:
+        return f"{base}\n\n{note}"
+    return base
+
+
+def ensure_search_honesty_prefix(message: str, products: list | None) -> str:
+    """Force one honesty note at the top of a reply (web LLM path).
+
+    Formatter path already uses build_search_intro; this covers cases where the
+    model writes the product reply and might omit fallback_note.
+    """
+    note = products_honesty_note(products)
+    if not note:
+        return message or ""
+    msg = (message or "").strip()
+    if not msg:
+        return note
+    lowered = msg.lower()
+    if note.lower() in lowered:
+        return msg
+    # Model paraphrased the same honesty — don't stack a second note.
+    if "no exact size match" in lowered and "size" in note.lower():
+        return msg
+    if "broadened search" in lowered and "broadened" in note.lower():
+        return msg
+    if "showing other shapes" in lowered and "shape" in note.lower():
+        return msg
+    return f"{note}\n\n{msg}"
