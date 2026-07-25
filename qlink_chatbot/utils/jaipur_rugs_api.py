@@ -253,11 +253,22 @@ async def jaipur_rugs_product_search(
             )
             norm_source = "regex_normalise_keyword"
 
-        requested_currency = (
-            normalize_currency_code(requested_currency)
-            if requested_currency
-            else (price_filter or {}).get("currency")
+        # Budget / wording currency beats country default. Web IN sessions were
+        # forcing INR display+field even when the user said "15000 usd".
+        price_currency = ""
+        if price_filter and price_filter.get("currency"):
+            price_currency = normalize_currency_code(str(price_filter.get("currency")))
+        message_currency = (
+            extract_requested_currency_from_text(user_message)
             or extract_requested_currency_from_text(keyword)
+        )
+        arg_currency = (
+            normalize_currency_code(requested_currency) if requested_currency else ""
+        )
+        requested_currency = (
+            price_currency
+            or message_currency
+            or arg_currency
             or detected_currency
         )
         logger.info(

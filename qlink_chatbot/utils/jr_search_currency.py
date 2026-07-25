@@ -85,9 +85,14 @@ def _currency_alias_pattern() -> str:
 
 
 def extract_requested_currency_from_text(text: str) -> str:
+    """Pull an explicit currency from user text (budget or 'prices in X')."""
     lower = (text or "").lower()
     alias_pattern = _currency_alias_pattern()
     for pattern in [
+        # "above 15000 usd" / "under usd 5000" / "between 5k and 10k usd"
+        rf"\b(?:above|below|under|over|between|from|to)\b[^.]{{0,40}}\b({alias_pattern})\b",
+        rf"\b({alias_pattern})\s*[\d,]",
+        rf"[\d,]+\s*({alias_pattern})\b",
         rf"\bin\s*({alias_pattern})\b",
         rf"\bin({alias_pattern})\b",
         rf"\b({alias_pattern})\s*(?:price|prices|pricing|mrp)\b",

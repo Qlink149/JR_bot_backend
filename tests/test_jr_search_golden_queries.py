@@ -401,6 +401,16 @@ def test_golden_honesty_single_note_on_shape_drop():
 # Ranking: GrColor red still beats ColorFamily soft coral
 # ---------------------------------------------------------------------------
 
+def test_usd_budget_beats_india_country_default_for_display():
+    """IN locale must not force INR when user asked USD 15–20k."""
+    from qlink_chatbot.utils.jr_search_currency import extract_requested_currency_from_text
+
+    assert extract_requested_currency_from_text(
+        "show me red rugs above 15000 usd and below 20000 usd round shape"
+    ) == "USD"
+    assert extract_requested_currency_from_text("under INR 50000") == "INR"
+
+
 def test_golden_nearest_first_grcolor_beats_colorfamily():
     soft = _rug(
         SKU="PAE-5080-0001",

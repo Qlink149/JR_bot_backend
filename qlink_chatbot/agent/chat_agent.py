@@ -908,8 +908,10 @@ async def _run_product_show_more(
         search_keyword,
         client_ip=client_ip,
         country_code=country_code,
-        requested_currency=detected_currency,
+        # Empty → resolve from keyword budget / country inside search.
+        requested_currency="",
         exclude_skus=exclude_skus or None,
+        user_message=user_message,
         skip_llm_extraction=True,
         pool_out=pool,
     )
@@ -1269,11 +1271,13 @@ async def chat_agent(
                         )
                     llm_extract_debug: list = []
                     pool: list = []
+                    # Prefer tool currency; else let search resolve from user
+                    # budget text / price_filter (do NOT force country INR over USD asks).
                     products = await jaipur_rugs_product_search(
                         keyword,
                         client_ip=client_ip,
                         country_code=country_code,
-                        requested_currency=args.get("currency") or detected_currency,
+                        requested_currency=(args.get("currency") or "").strip(),
                         exclude_skus=exclude_skus,
                         user_message=user_message,
                         previous_search_keyword=(
@@ -1454,7 +1458,7 @@ async def chat_agent(
                 keyword,
                 client_ip=client_ip,
                 country_code=country_code,
-                requested_currency=detected_currency,
+                requested_currency="",
                 user_message=user_message,
                 previous_search_keyword=(
                     "" if ignore_previous else _latest_search_keyword(previous_searches)
