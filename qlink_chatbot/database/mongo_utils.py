@@ -344,6 +344,7 @@ def save_search_buffer(
     *,
     offset: int = 0,
     collection_name: str = "users",
+    search_strategy: str = "",
 ):
     """Persist remaining product pool for show-more pagination."""
     try:
@@ -357,6 +358,7 @@ def save_search_buffer(
                         "keyword": keyword,
                         "products": products if isinstance(products, list) else [],
                         "offset": max(0, int(offset)),
+                        "search_strategy": (search_strategy or "").strip(),
                         "updated_at": now,
                     },
                     "updated_at": now,

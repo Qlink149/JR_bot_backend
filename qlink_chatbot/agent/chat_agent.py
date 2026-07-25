@@ -27,6 +27,7 @@ from qlink_chatbot.utils.jaipur_rugs_api import (
 from qlink_chatbot.utils.jr_search_currency import price_filter_to_keyword
 from qlink_chatbot.utils.jr_search_keywords import normalise_keyword
 from qlink_chatbot.utils.jr_search_llm_extract import (
+    _message_has_catalog_attrs,
     _should_ignore_previous_search,
     resolve_hygienic_search_keyword,
     resolved_keyword_for_memory,
@@ -272,7 +273,7 @@ def _merge_search_with_previous(
     user_message: str,
     previous_searches,
 ) -> str:
-    """Combine a price-only refinement with the previous catalog search keyword.
+    """Combine a price-only or only/just refine with the previous catalog keyword.
 
     Catalog attrs are read from the *user message only* (Kisna-style). Never treat
     a polluted agent tool keyword as evidence of a new shop-by ask.
@@ -285,20 +286,53 @@ def _merge_search_with_previous(
     if not text:
         return keyword or user_message
 
-    price_filter, _clean_keyword, _, attribute_filters = normalise_keyword(text)
-    if not price_filter:
-        return keyword or user_message
-
+    price_filter, clean_new, _, attribute_filters = normalise_keyword(text)
     catalog_attrs = (
         "color", "color_exact", "shape", "size", "size_cm", "size_category",
         "material", "construction", "pattern", "room", "catalog_tag", "multicolor",
     )
     has_new_catalog_attrs = any(attribute_filters.get(key) for key in catalog_attrs)
-    if has_new_catalog_attrs:
+    refine_hint = bool(
+        re.search(
+            r"\b(only|just|instead|make it|rather|also|but)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+    last_price, last_clean, _, _ = normalise_keyword(last_keyword)
+    last_price_kw = price_filter_to_keyword(last_price) if last_price else ""
+
+    # "only wool" / "make it rectangle" → glue onto prior search, don't replace.
+    if refine_hint and has_new_catalog_attrs and (clean_new or price_filter):
+        add_part = clean_new or ""
+        if price_filter:
+            pk = price_filter_to_keyword(price_filter)
+            add_part = f"{add_part}&{pk}" if add_part else pk
+        base = last_clean or last_price_kw
+        if base and add_part:
+            merged = f"{base}&{add_part}"
+            logger.info(
+                f"[AGENT-GUARD] merged attr refinement keyword={merged!r} "
+                f"from last={last_keyword!r}"
+            )
+            return merged
+        if add_part and last_price_kw and not last_clean:
+            # Prior was price-only; keep budget + new facet.
+            merged = f"{add_part}&{last_price_kw}"
+            logger.info(
+                f"[AGENT-GUARD] merged attr+prior-price keyword={merged!r} "
+                f"from last={last_keyword!r}"
+            )
+            return merged
+
+    if not price_filter:
+        return keyword or user_message
+
+    if has_new_catalog_attrs and not refine_hint:
         # Fresh shop-by / mega-menu ask — do not glue previous filters.
         return user_message
 
-    _, last_clean, _, _ = normalise_keyword(last_keyword)
     price_keyword = price_filter_to_keyword(price_filter)
     if last_clean:
         merged = f"{last_clean}&{price_keyword}"
@@ -501,6 +535,31 @@ def _is_product_detail_followup(user_message: str, chat_history) -> bool:
     return any(re.search(rf"\b{re.escape(phrase)}\b", msg) for phrase in _PRODUCT_DETAIL_PHRASES)
 
 
+def _is_agent_handoff_query(user_message: str) -> bool:
+    msg = (user_message or "").lower().strip()
+    if not msg:
+        return False
+    cues = (
+        "human agent", "talk to a human", "talk to human", "speak to a human",
+        "real person", "customer care", "customer service", "connect me to",
+        "connect me with", "speak to an agent", "talk to an agent",
+        "transfer me", "escalate", "live agent", "live chat agent",
+    )
+    return any(c in msg for c in cues)
+
+
+def _is_custom_rug_query(user_message: str) -> bool:
+    msg = (user_message or "").lower().strip()
+    if not msg:
+        return False
+    if "custom" not in msg and "bespoke" not in msg and "own design" not in msg:
+        return False
+    return any(
+        t in msg
+        for t in ("rug", "carpet", "design", "bespoke", "made to order", "make a rug")
+    )
+
+
 def _is_new_product_search_request(user_message: str, chat_history, previous_searches=None) -> bool:
     """True when the user is asking for a fresh catalog search, not a detail follow-up."""
     if _is_product_detail_followup(user_message, chat_history):
@@ -509,11 +568,26 @@ def _is_new_product_search_request(user_message: str, chat_history, previous_sea
         return False
     if _is_rug_pad_query(user_message) or _is_order_address_query(user_message):
         return False
+    if _is_agent_handoff_query(user_message) or _is_custom_rug_query(user_message):
+        return False
     if _is_short_affirmative(user_message):
         return False
     msg = (user_message or "").lower().strip()
+    # "I want to talk…" / "I need a human…" must not match bare i want/i need alone.
+    if _is_agent_handoff_query(msg):
+        return False
     if _SEARCH_INTENT_RE.search(msg):
-        return True
+        # Still require rug/catalog signal unless it's a clear shop-by phrase.
+        if any(
+            t in msg
+            for t in (
+                "rug", "rugs", "carpet", "arrival", "bestseller", "best seller",
+                "swatch", "outdoor", "antique",
+            )
+        ) or re.search(r"\b(under|above|below|over)\s+\d", msg):
+            return True
+        # Color/size-only "show me red" still counts via attrs below.
+        pass
     # Bare category / attribute browses: "new arrival rugs", "wool rugs", "8x10 rugs"
     _pf, _clean, _colors, attrs = normalise_keyword(msg)
     has_search_attrs = any(
@@ -533,6 +607,8 @@ def _is_new_product_search_request(user_message: str, chat_history, previous_sea
         "show me", "show", "find", "search", "do you have", "looking for",
         "look for", "i want", "i need", "any ",
     )
+    if _is_agent_handoff_query(msg) or _is_custom_rug_query(msg):
+        return False
     return any(v in msg for v in search_verbs) and any(t in msg for t in rug_terms)
 
 
@@ -555,8 +631,43 @@ def _last_assistant_asks_followup(chat_history) -> bool:
         "would you like", "want to know more", "know more", "tell you more",
         "shall i", "should i", "interested", "learn more", "more about",
         "connect you", "callback", "call you",
+        "find some", "search for", "show you", "please confirm", "did you mean",
+        "want me to", "shall i search", "would you like me to",
     )
     return any(c in text for c in cues)
+
+
+def _prior_user_search_message(chat_history) -> str:
+    """Most recent user message that looks like a catalog ask (skip yes/ok)."""
+    for msg in reversed(chat_history or []):
+        if msg.get("role") != "user":
+            continue
+        text = (msg.get("content") or "").strip()
+        if not text or _is_short_affirmative(text):
+            continue
+        if _message_has_catalog_attrs(text) or any(
+            t in text.lower() for t in ("rug", "rugs", "carpet", "dari")
+        ):
+            return text
+    return ""
+
+
+def _pinned_strategy_from_products(products) -> str:
+    if not isinstance(products, list):
+        return ""
+    return next(
+        (str(p.get("search_strategy") or "") for p in products if isinstance(p, dict) and p.get("search_strategy")),
+        "",
+    )
+
+
+def _pinned_strategy_from_previous(previous_searches) -> str:
+    if not previous_searches:
+        return ""
+    latest = previous_searches[-1] if isinstance(previous_searches, list) else {}
+    if not isinstance(latest, dict):
+        return ""
+    return _pinned_strategy_from_products(latest.get("results") or [])
 
 def agent_alert_tool(
     alert,
@@ -902,11 +1013,19 @@ async def _run_product_show_more(
         )
 
     # Prefer buffered pool from the last search (no re-query).
+    # Explicit "show more 5x8" is a new size ask — do not page the old pool.
+    explicit_show_more = _extract_show_more_keyword(user_message)
     buffer = get_search_buffer(session_id, collection_name=collection_name)
     buf_products = buffer.get("products") if isinstance(buffer, dict) else None
     buf_keyword = (buffer.get("keyword") or "") if isinstance(buffer, dict) else ""
     buf_offset = int(buffer.get("offset") or 0) if isinstance(buffer, dict) else 0
-    if isinstance(buf_products, list) and buf_products and buf_offset < len(buf_products):
+    buf_strategy = (buffer.get("search_strategy") or "") if isinstance(buffer, dict) else ""
+    if (
+        not explicit_show_more
+        and isinstance(buf_products, list)
+        and buf_products
+        and buf_offset < len(buf_products)
+    ):
         page = buf_products[buf_offset: buf_offset + SEARCH_PAGE_SIZE]
         if page:
             new_offset = buf_offset + len(page)
@@ -916,6 +1035,7 @@ async def _run_product_show_more(
                 buf_products,
                 offset=new_offset,
                 collection_name=collection_name,
+                search_strategy=buf_strategy or _pinned_strategy_from_products(buf_products),
             )
             save_previous_search(
                 session_id,
@@ -957,8 +1077,16 @@ async def _run_product_show_more(
             "Want to refine by a different size, color, material, or budget?"
         )
 
+    pinned = (buffer.get("search_strategy") or "") if isinstance(buffer, dict) else ""
+    if not pinned:
+        pinned = _pinned_strategy_from_previous(previous_searches)
+    # Explicit "show more 5x8" is a new size ask — do not pin old relax strategy.
+    if _extract_show_more_keyword(user_message):
+        pinned = ""
+
     logger.info(
-        f"[AGENT-GUARD] show-more keyword={search_keyword!r} exclude_skus={exclude_skus}"
+        f"[AGENT-GUARD] show-more keyword={search_keyword!r} "
+        f"exclude_skus={len(exclude_skus or [])} pinned_strategy={pinned!r}"
     )
     pool: list = []
     more_products = await jaipur_rugs_product_search(
@@ -971,11 +1099,12 @@ async def _run_product_show_more(
         user_message=user_message,
         skip_llm_extraction=True,
         pool_out=pool,
+        pinned_strategy=pinned,
     )
     if isinstance(more_products, dict) and more_products.get("error"):
         return (
-            f"I couldn't find more rugs matching your search ({search_keyword}). "
-            "Would you like to try a different size, shape, or budget?"
+            "I've shown all rugs from that search. "
+            "Want to refine by a different size, color, material, or budget?"
         )
     if not isinstance(more_products, list) or not more_products:
         return (
@@ -990,6 +1119,7 @@ async def _run_product_show_more(
         full_pool,
         offset=len(more_products),
         collection_name=collection_name,
+        search_strategy=_pinned_strategy_from_products(full_pool) or pinned,
     )
     save_previous_search(
         session_id,
@@ -1109,6 +1239,45 @@ async def chat_agent(
                 "with slip resistance, floor protection, cushioning, and longer rug life. "
                 "Learn more: https://www.jaipurrugs.com/in/know-your-rug/about-rug-pads. "
                 f"For sizing or purchase help, contact {SHOP_EMAIL} or {support_phone} "
+                "(WhatsApp available)."
+            )
+
+        if _is_agent_handoff_query(user_message):
+            agent_alert_tool(
+                alert=f"User requested human agent: {user_message}",
+                sesson_id=session_id,
+                callback_requested=False,
+                collection_name=collection_name,
+            )
+            return (
+                "I've notified our team — a rug specialist will connect as soon as available. "
+                "If you'd prefer a callback, share your phone number (with country code) and "
+                "a preferred time."
+            )
+
+        if _is_custom_rug_query(user_message):
+            return (
+                "Yes, we do custom rugs — including rugs made with your own design! "
+                f"Email {SHOP_EMAIL} or call +91 7665017083 with your size, materials, and "
+                "any design references. Our team will guide you on lead time (typically 6–12 weeks)."
+            )
+
+        # Hard FAQ guard — never invent UPI/COD acceptance from stale KB snippets.
+        _pay_msg = (user_message or "").lower()
+        if re.search(
+            r"\b(upi|cod|cash on delivery|net banking|paytm|phonepe|gpay|google pay)\b",
+            _pay_msg,
+        ) and re.search(
+            r"\b(accept|accepted|payment|pay with|pay via|can i pay|do you (take|accept)|"
+            r"is \w+ (ok|okay|fine)|available)\b",
+            _pay_msg,
+        ):
+            return (
+                "Per Jaipur Rugs' official FAQ, checkout lists major credit/debit cards "
+                "(Visa, MasterCard, American Express) and PayPal; Snapmint financing may "
+                "also appear at checkout. **UPI, COD, net banking, and wallets are not listed** "
+                "as accepted payment methods. For confirmation on your order, contact "
+                f"{SHOP_EMAIL} or {general_support_phone(country_code, session_id)} "
                 "(WhatsApp available)."
             )
 
@@ -1302,25 +1471,57 @@ async def chat_agent(
                 if item.name == "jaipur_rugs_product_search":
                     model_keyword = resolve_search_keyword(args, "")
                     keyword = resolve_hygienic_search_keyword(args, user_message)
+                    # Affirmative after "shall I search brown medium?" → replay prior ask.
+                    if _is_short_affirmative(user_message) and (
+                        _last_assistant_asks_followup(chat_history)
+                        or (keyword or "").strip().lower() in {
+                            "yes", "yeah", "yep", "yup", "sure", "ok", "okay",
+                        }
+                    ):
+                        prior = _prior_user_search_message(chat_history)
+                        if prior:
+                            keyword = prior
+                            logger.info(
+                                f"[AGENT-GUARD] affirmative → replay prior search "
+                                f"keyword={keyword!r}"
+                            )
                     ignore_previous = _should_ignore_previous_search(keyword, user_message)
                     if not ignore_previous:
                         keyword = _merge_search_with_previous(
                             keyword,
-                            user_message,
+                            user_message if not _is_short_affirmative(user_message) else keyword,
                             previous_searches,
                         )
                     exclude_skus = None
                     skip_llm_extraction = False
+                    pinned_strategy = ""
                     if _is_product_show_more_followup(user_message, chat_history, previous_searches):
-                        exclude_skus = _shown_skus_from_searches(previous_searches, latest_only=True)
-                        last_keyword = _latest_search_keyword(previous_searches)
-                        if last_keyword and (
-                            not keyword
-                            or keyword.lower().strip() in _PRODUCT_SHOW_MORE_PHRASES
-                        ):
-                            keyword = last_keyword
-                            skip_llm_extraction = True
-                            ignore_previous = False
+                        explicit_sm = _extract_show_more_keyword(user_message)
+                        if explicit_sm:
+                            # "show more 5x8" → new size ask, not another page of round.
+                            keyword = explicit_sm
+                            skip_llm_extraction = False
+                            ignore_previous = True
+                            pinned_strategy = ""
+                            exclude_skus = _shown_skus_for_keyword(previous_searches, explicit_sm)
+                        else:
+                            exclude_skus = _shown_skus_from_searches(
+                                previous_searches, latest_only=True
+                            )
+                            last_keyword = _latest_search_keyword(previous_searches)
+                            if last_keyword and (
+                                not keyword
+                                or keyword.lower().strip() in _PRODUCT_SHOW_MORE_PHRASES
+                            ):
+                                keyword = last_keyword
+                                skip_llm_extraction = True
+                                ignore_previous = False
+                            buf = get_search_buffer(session_id, collection_name=collection_name)
+                            pinned_strategy = (
+                                (buf.get("search_strategy") or "") if isinstance(buf, dict) else ""
+                            )
+                            if not pinned_strategy:
+                                pinned_strategy = _pinned_strategy_from_previous(previous_searches)
                     if not keyword:
                         logger.warning(
                             f"[AGENT-TOOL] jaipur_rugs_product_search missing keyword "
@@ -1336,7 +1537,9 @@ async def chat_agent(
                         country_code=country_code,
                         requested_currency=(args.get("currency") or "").strip(),
                         exclude_skus=exclude_skus,
-                        user_message=user_message,
+                        user_message=(
+                            keyword if _is_short_affirmative(user_message) else user_message
+                        ),
                         previous_search_keyword=(
                             "" if ignore_previous else _latest_search_keyword(previous_searches)
                         ),
@@ -1348,6 +1551,7 @@ async def chat_agent(
                         skip_llm_extraction=skip_llm_extraction,
                         extraction_debug_out=llm_extract_debug,
                         pool_out=pool,
+                        pinned_strategy=pinned_strategy,
                     )
                     memory_keyword = resolved_keyword_for_memory(
                         keyword,
@@ -1374,6 +1578,7 @@ async def chat_agent(
                         collection_name=collection_name,
                         allow_empty=is_error or product_count == 0,
                     )
+                    win_strategy = _winning_search_strategy(product_list)
                     if product_list:
                         save_search_buffer(
                             session_id,
@@ -1381,11 +1586,11 @@ async def chat_agent(
                             pool or product_list,
                             offset=len(product_list),
                             collection_name=collection_name,
+                            search_strategy=pinned_strategy or win_strategy,
                         )
                     else:
                         clear_search_buffer(session_id, collection_name=collection_name)
                     size_relaxed = any(p.get("size_relaxed") for p in product_list)
-                    win_strategy = _winning_search_strategy(product_list)
                     win_note = _winning_fallback_note(product_list)
                     log_search_turn(
                         session_id=session_id,
@@ -1497,25 +1702,43 @@ async def chat_agent(
                 })
 
         # Step 2b: Force product search when the model skipped the tool on a clear search request
+        affirmative_replay = (
+            not has_tool_calls
+            and _is_short_affirmative(user_message)
+            and _last_assistant_asks_followup(chat_history)
+            and bool(_prior_user_search_message(chat_history))
+        )
         if (
             not has_tool_calls
-            and not (_is_short_affirmative(user_message) and _last_assistant_asks_followup(chat_history))
             and (
-            _is_new_product_search_request(user_message, chat_history, previous_searches)
-            or _is_price_refinement_followup(user_message, previous_searches)
-        )
-        ):
-            keyword = resolve_hygienic_search_keyword({}, user_message)
-            ignore_previous = _should_ignore_previous_search(keyword, user_message)
-            if not ignore_previous:
-                keyword = _merge_search_with_previous(
-                    keyword,
-                    user_message,
-                    previous_searches,
+                affirmative_replay
+                or (
+                    not (_is_short_affirmative(user_message) and _last_assistant_asks_followup(chat_history))
+                    and (
+                        _is_new_product_search_request(
+                            user_message, chat_history, previous_searches
+                        )
+                        or _is_price_refinement_followup(user_message, previous_searches)
+                    )
                 )
+            )
+        ):
+            if affirmative_replay:
+                keyword = _prior_user_search_message(chat_history)
+                ignore_previous = True
+            else:
+                keyword = resolve_hygienic_search_keyword({}, user_message)
+                ignore_previous = _should_ignore_previous_search(keyword, user_message)
+                if not ignore_previous:
+                    keyword = _merge_search_with_previous(
+                        keyword,
+                        user_message,
+                        previous_searches,
+                    )
             logger.info(
                 f"[AGENT-FORCE-SEARCH] session={session_id} "
-                f"keyword={keyword!r} ignore_previous={ignore_previous}"
+                f"keyword={keyword!r} ignore_previous={ignore_previous} "
+                f"affirmative_replay={affirmative_replay}"
             )
             llm_extract_debug: list = []
             pool: list = []
@@ -1524,7 +1747,7 @@ async def chat_agent(
                 client_ip=client_ip,
                 country_code=country_code,
                 requested_currency="",
-                user_message=user_message,
+                user_message=keyword if affirmative_replay else user_message,
                 previous_search_keyword=(
                     "" if ignore_previous else _latest_search_keyword(previous_searches)
                 ),
@@ -1552,6 +1775,7 @@ async def chat_agent(
                 collection_name=collection_name,
                 allow_empty=is_error or not product_list,
             )
+            win_strategy = _winning_search_strategy(product_list)
             if product_list:
                 save_search_buffer(
                     session_id,
@@ -1559,10 +1783,10 @@ async def chat_agent(
                     pool or product_list,
                     offset=len(product_list),
                     collection_name=collection_name,
+                    search_strategy=win_strategy,
                 )
             else:
                 clear_search_buffer(session_id, collection_name=collection_name)
-            win_strategy = _winning_search_strategy(product_list)
             win_note = _winning_fallback_note(product_list)
             log_search_turn(
                 session_id=session_id,

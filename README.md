@@ -96,6 +96,23 @@ python -m pytest tests/test_jr_search_golden_queries.py -q
 
 Covers soft new arrival, aurelia+red, red+round+USD (PAE-5080-class ColorFamily), medium/5×8, show-more, Hindi color, bleed, and single honesty note.
 
+### Extensive smoke (offline + optional live)
+
+```bash
+# Offline assertions (strategies, Hinglish, currency, WA captions, honesty, KB fixture)
+python scripts/extensive_smoke.py
+
+# Offline + full related pytest
+python scripts/extensive_smoke.py --pytest
+
+# Live Mongo battery (needs .env). Add --live-llm for LLM extract.
+python scripts/extensive_smoke.py --live
+python scripts/extensive_smoke.py --pytest --live --live-llm
+
+# Manual founder checklist only
+python scripts/extensive_smoke.py --checklist
+```
+
 ### Knowledge base (policy FAQ)
 
 Bundled pages live in `data/policy_kb_pages.json`. If Pinecone answers are empty/stale on Vultr, re-ingest:

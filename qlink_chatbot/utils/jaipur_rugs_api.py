@@ -94,14 +94,19 @@ async def jaipur_rugs_product_search(
     pool_out: list | None = None,
     page_size: int | None = None,
     pool_size: int | None = None,
+    pinned_strategy: str = "",
 ):
     """Search products from MongoDB (synced Product Master).
 
     Returns the first ``page_size`` products. When ``pool_out`` is provided,
     the full ranked pool (up to ``pool_size``) is appended for show-more buffer.
+
+    ``pinned_strategy`` (show-more): stop after that strategy id — do not escalate
+    to a broader drop (e.g. drop_size → drop_shape).
     """
     page_size = page_size if page_size is not None else SEARCH_PAGE_SIZE
     pool_size = pool_size if pool_size is not None else SEARCH_POOL_SIZE
+    pinned_strategy = (pinned_strategy or "").strip()
     try:
         keyword = (keyword or "").strip()
         llm_extraction_debug = None
@@ -268,6 +273,26 @@ async def jaipur_rugs_product_search(
         strategies = build_search_strategies(
             clean_keyword, attribute_filters, price_filter
         )
+        if pinned_strategy:
+            # Show-more: keep the same relax level; never escalate past the pin.
+            pinned = []
+            for strat in strategies:
+                pinned.append(strat)
+                if strat.id == pinned_strategy:
+                    break
+            if any(s.id == pinned_strategy for s in strategies):
+                strategies = pinned
+                logger.info(
+                    f"[SEARCH] pinned_strategy={pinned_strategy!r} "
+                    f"ids={[s.id for s in strategies]}"
+                )
+            else:
+                # Unknown pin — still try exact only to avoid wild escalation.
+                strategies = [s for s in strategies if s.id == "exact"] or strategies[:1]
+                logger.info(
+                    f"[SEARCH] pinned_strategy={pinned_strategy!r} not in list — "
+                    f"using {[s.id for s in strategies]}"
+                )
         unique_results: list = []
         color_search_tier: str | None = None
         size_relaxed = False

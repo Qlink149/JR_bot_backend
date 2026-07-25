@@ -174,6 +174,7 @@ SHAPE_ALIASES: dict[str, str] = {
     "circular": "Round",
     "circle": "Round",
     "gol": "Round",  # Hinglish
+    "गोल": "Round",  # Devanagari
     "oval": "Oval",
     "square": "Square",
     "runner": "Runner",

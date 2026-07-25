@@ -448,11 +448,67 @@ def product_matches_catalog_tag(product: dict, tag: str) -> bool:
 
 
 def shape_field_matches(term: str, shape_value: str) -> bool:
+    """Match catalog Shape values like '9 Round' / 'Round' to user term 'round'."""
     shape = (shape_value or "").lower().strip()
     if not shape or not term:
         return False
-    catalog = SHAPE_ALIASES.get(term.lower(), term)
-    return shape == catalog.lower() or term.lower() == shape
+    key = term.lower().strip()
+    catalog = str(SHAPE_ALIASES.get(key) or key).lower().strip()
+    if shape == catalog or shape == key:
+        return True
+    # Size-prefixed shapes from Product Master: "9 Round", "6' Round", etc.
+    if re.search(rf"\b{re.escape(catalog)}\b", shape):
+        return True
+    if catalog != key and re.search(rf"\b{re.escape(key)}\b", shape):
+        return True
+    return False
+
+
+def _size_text_implies_shape(product: dict, catalog_shape: str) -> bool:
+    """Infer shape from SizeInFT / SizeGroup when Shape is blank or size-coded."""
+    catalog = (catalog_shape or "").lower().strip()
+    if not catalog:
+        return False
+    size_bits = " ".join(
+        str(product.get(f) or "")
+        for f in ("SizeInFT", "SizeInCM", "SizeGroupInFT", "SizeGroupInCM", "Shape")
+    ).lower()
+    if not size_bits.strip():
+        return False
+    if catalog == "round":
+        return bool(re.search(r"\bround\b|\bdia\b|diameter", size_bits))
+    if catalog == "runner":
+        return bool(re.search(r"\brunner\b", size_bits))
+    if catalog == "square":
+        if re.search(r"\bsquare\b", size_bits):
+            return True
+        # Equal sides: 8x8, 3X3, 6'x6'
+        return bool(re.search(r"\b(\d+(?:'\d*)?)\s*[x×]\s*\1\b", size_bits, re.I))
+    if catalog == "oval":
+        return bool(re.search(r"\boval\b", size_bits))
+    if catalog == "rectangle":
+        # Rectangular when not clearly another specialty shape.
+        if re.search(r"\b(round|runner|oval|square|dia)\b", size_bits):
+            return False
+        return bool(re.search(r"\d+\s*[x×]\s*\d+", size_bits))
+    return False
+
+
+def product_matches_shape(product: dict, term: str) -> bool:
+    """Match user shape term against Shape field and size-string fallbacks."""
+    key = (term or "").lower().strip()
+    if not key:
+        return False
+    catalog = str(SHAPE_ALIASES.get(key) or key).lower().strip()
+    shape_val = str(product.get("Shape") or "")
+    if shape_field_matches(key, shape_val):
+        return True
+    # Some rows store shape only in size text ("8 Round") with empty Shape.
+    if shape_field_matches(key, str(product.get("SizeInFT") or "")):
+        return True
+    if shape_field_matches(key, str(product.get("SizeGroupInFT") or "")):
+        return True
+    return _size_text_implies_shape(product, catalog)
 
 
 def part_matches_product(
@@ -472,7 +528,7 @@ def part_matches_product(
         return product_matches_color_terms(product, terms, mixture_mode=mixture_mode)
 
     if segment_type == "shape":
-        return shape_field_matches(part_lower, str(product.get("Shape") or ""))
+        return product_matches_shape(product, part_lower)
 
     if segment_type == "weight":
         weight_match = WEIGHT_PATTERN.search(part_lower)
@@ -782,7 +838,7 @@ def apply_attribute_post_filters(
     if shape_terms:
         filtered = [
             p for p in result
-            if any(shape_field_matches(t, str(p.get("Shape") or "")) for t in shape_terms)
+            if any(product_matches_shape(p, t) for t in shape_terms)
         ]
         if filtered:
             logger.info(f"[SEARCH] shape filter: {len(result)} → {len(filtered)} (terms={shape_terms})")

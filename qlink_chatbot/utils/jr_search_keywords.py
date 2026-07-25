@@ -125,9 +125,14 @@ def preprocess_natural_language(keyword: str) -> str:
     remaining = ROUND_SIZE_PATTERN.sub(" ", remaining).strip()
 
     for alias in sorted(SHAPE_ALIASES, key=len, reverse=True):
-        if re.search(rf"\b{re.escape(alias)}\b", remaining):
+        # Devanagari (गोल) has no \b word boundaries — use plain contains.
+        if alias.isascii():
+            pattern = rf"\b{re.escape(alias)}\b"
+        else:
+            pattern = re.escape(alias)
+        if re.search(pattern, remaining):
             found.append(alias)
-            remaining = re.sub(rf"\b{re.escape(alias)}\b", " ", remaining).strip()
+            remaining = re.sub(pattern, " ", remaining).strip()
 
     for alias in sorted(PATTERN_ALIASES, key=len, reverse=True):
         if re.search(rf"\b{re.escape(alias)}\b", remaining):

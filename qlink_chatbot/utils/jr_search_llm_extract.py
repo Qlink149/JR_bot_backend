@@ -196,7 +196,7 @@ def summarise_normalise_result(
 
 _REFINEMENT_HINT = re.compile(
     r"\b(also|instead|same|that|those|these|from (the )?last|more like|show more|"
-    r"but (in|with|for)|keep (the|my))\b",
+    r"but (in|with|for)|keep (the|my)|only|just|make it|rather)\b",
     re.IGNORECASE,
 )
 
@@ -289,6 +289,12 @@ def tool_keyword_has_context_bleed(model_kw: str, user_message: str) -> bool:
     return False
 
 
+_NOISE_SEARCH_KEYWORDS = frozenset({
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "go ahead",
+    "no", "nope", "nah", "any size", "anything", "whatever",
+})
+
+
 def resolve_hygienic_search_keyword(args: dict | None, user_message: str = "") -> str:
     """Resolve tool keyword without trusting chat-history bleed from the model.
 
@@ -299,6 +305,18 @@ def resolve_hygienic_search_keyword(args: dict | None, user_message: str = "") -
 
     message = (user_message or "").strip()
     model_only = resolve_search_keyword(args, "")
+    if model_only and model_only.strip().lower() in _NOISE_SEARCH_KEYWORDS:
+        logger.info(
+            f"[SEARCH-HYGIENE] noise model keyword={model_only!r} "
+            f"— using user_message={message!r}"
+        )
+        model_only = ""
+        args = {}
+
+    if message and message.strip().lower() in _NOISE_SEARCH_KEYWORDS:
+        # Affirmatives are recovered by the agent from chat history; do not
+        # search the literal word "yes".
+        return ""
 
     if message and _should_ignore_previous_search("", message):
         if model_only and model_only.lower() != message.lower():
