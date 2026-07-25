@@ -505,7 +505,7 @@ LIVE_CASES: list[dict[str, Any]] = [
         "query": "is there any new arrival",
         "currency": "INR",
         "country": "IN",
-        "notes": "Must NOT bleed prior aurelia/red; strategy usually exact or drop_catalog_tag",
+        "notes": "Must NOT bleed prior aurelia/red; strategy exact (never drop_catalog_tag)",
     },
     {
         "id": "aurelia_red",

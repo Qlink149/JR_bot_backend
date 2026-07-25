@@ -34,11 +34,8 @@ _DROP_ATTR_STEPS: tuple[tuple[str, str, str], ...] = (
     ),
     ("room", "drop_room", "Broadened search by dropping the room filter."),
     ("weight_max", "drop_weight", "Broadened search by dropping the weight filter."),
-    (
-        "catalog_tag",
-        "drop_catalog_tag",
-        "Broadened search by dropping the catalog-tag filter.",
-    ),
+    # catalog_tag is NEVER dropped here — showing untagged rugs as "new/bestsellers"
+    # is worse than an honest empty. Tag+price can still widen/drop price with tag kept.
     ("pattern", "drop_pattern", "Broadened search by dropping the pattern filter."),
     (
         "construction",
@@ -259,14 +256,15 @@ def build_search_strategies(
 
 
 # Mongo empty-$and bootstrap (recall) — kept separate from post-filter strategies.
+# Drop room before shape so "runner&hallway" recovers runners (hallway is sparse).
+# Never drop catalog_tag here — empty tagged pool must stay empty, not random rugs.
 MONGO_SEGMENT_DROP_ORDER: tuple[tuple[str, str], ...] = (
     ("size", "No exact size match in catalog — showing other sizes."),
-    ("shape", "No rugs matched that shape with your other filters — showing other shapes."),
     ("room", "Broadened search by dropping the room filter."),
+    ("shape", "No rugs matched that shape with your other filters — showing other shapes."),
     ("pattern", "Broadened search by dropping the pattern filter."),
     ("construction", "Broadened search by dropping the construction filter."),
     ("material", "Broadened search by dropping the material filter."),
-    ("catalog_tag", "Broadened search by dropping the catalog-tag filter."),
     ("weight", "Broadened search by dropping the weight filter."),
     ("general", "Broadened search — showing closer catalog matches."),
 )

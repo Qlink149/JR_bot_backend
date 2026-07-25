@@ -1281,6 +1281,14 @@ async def chat_agent(
                 "(WhatsApp available)."
             )
 
+        if re.search(r"\bgift\s*cards?\b|\bgift\s*vouchers?\b", _pay_msg):
+            return (
+                "Yes — Jaipur Rugs offers gift cards. For denominations, purchase, or "
+                "redemption help, contact "
+                f"{SHOP_EMAIL} or {general_support_phone(country_code, session_id)} "
+                "(WhatsApp available), or ask in chat and I can look up the latest policy details."
+            )
+
         if _is_store_query(user_message, chat_history, previous_searches):
             store_query = _store_query_from_message(user_message)
             store_result = search_store_locations(query=store_query)

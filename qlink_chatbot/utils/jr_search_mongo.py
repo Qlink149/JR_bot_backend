@@ -511,6 +511,38 @@ def product_matches_shape(product: dict, term: str) -> bool:
     return _size_text_implies_shape(product, catalog)
 
 
+_HALLWAY_ROOM_TERMS = frozenset({"hallway", "entryway", "corridor", "passage"})
+
+
+def product_matches_room(product: dict, term: str) -> bool:
+    """Match room intent against Room/MultiFilter (+ runner stand-in for hallway)."""
+    term_l = str(term or "").lower().strip()
+    if not term_l:
+        return False
+    room_fields = (
+        "Room",
+        "MultiFilter",
+        "FullDescription",
+        "ShortDescription",
+    )
+    for field in room_fields:
+        val = str(product.get(field) or "").lower()
+        if not val:
+            continue
+        if term_l in val or val in term_l:
+            return True
+        # "living" ↔ "Living Room"
+        head = term_l.split()[0]
+        if len(head) >= 4 and head in val.split():
+            return True
+        if len(head) >= 4 and re.search(rf"\b{re.escape(head)}\b", val):
+            return True
+    # Catalog has no Hallway Room value — runners are the practical stand-in.
+    if term_l in _HALLWAY_ROOM_TERMS:
+        return product_matches_shape(product, "runner")
+    return False
+
+
 def part_matches_product(
     product: dict,
     part: str,
@@ -548,10 +580,7 @@ def part_matches_product(
         return product_matches_catalog_tag(product, part_lower)
 
     if segment_type == "room":
-        return any(
-            part_lower in str(product.get(field) or "").lower()
-            for field in ("Room", "MultiFilter")
-        )
+        return product_matches_room(product, part_lower)
 
     if segment_type == "general":
         return any(
@@ -859,13 +888,13 @@ def apply_attribute_post_filters(
     if room_terms:
         filtered = [
             p for p in result
-            if any(
-                term in str(p.get(field) or "").lower()
-                for term in room_terms
-                for field in ("Room", "MultiFilter")
-            )
+            if any(product_matches_room(p, term) for term in room_terms)
         ]
         if filtered:
+            logger.info(
+                f"[SEARCH] room filter: {len(result)} → {len(filtered)} "
+                f"(terms={sorted(str(t) for t in room_terms)})"
+            )
             result = filtered
         else:
             return []

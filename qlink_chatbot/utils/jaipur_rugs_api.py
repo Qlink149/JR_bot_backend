@@ -467,6 +467,10 @@ async def jaipur_rugs_product_search(
             size_terms=attribute_filters.get("size") or set(),
             size_relaxed=size_relaxed,
             limit=pool_size,
+            price_filter=effective_price,
+            # Prefer rugs that still meet the user's original floor/ceiling
+            # even when widen_price lowered/raised the filter.
+            original_price_filter=price_filter,
         )
         logger.info(
             f"[SEARCH] selected {len(selected)} product(s) by color relevance "

@@ -232,6 +232,57 @@ def compute_color_match_score(
     }
 
 
+def _product_price_amount(product: dict, currency: str) -> float:
+    from qlink_chatbot.utils.jr_search_currency import CURRENCY_FIELDS
+
+    field = CURRENCY_FIELDS.get((currency or "INR").upper(), "INR_MRP")
+    raw = product.get(field)
+    try:
+        return float(str(raw).replace(",", "")) if raw not in (None, "", "0") else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def price_proximity_sort_key(
+    product: dict,
+    price_filter: dict | None,
+    *,
+    original_price_filter: dict | None = None,
+) -> tuple:
+    """Lower is better. Prefer meeting the user's original budget, then proximity."""
+    pf = original_price_filter or price_filter or {}
+    if not pf:
+        return (0, 0)
+    currency = str(
+        (price_filter or {}).get("currency")
+        or pf.get("currency")
+        or "INR"
+    )
+    amount = _product_price_amount(product, currency)
+    if amount <= 0:
+        return (2, 10**18)
+
+    if pf.get("min_amount") is not None and pf.get("max_amount") is not None:
+        lo = float(pf["min_amount"])
+        hi = float(pf["max_amount"])
+        target = (lo + hi) / 2.0
+        in_band = lo <= amount <= hi
+        return (0 if in_band else 1, abs(amount - target))
+
+    target = float(pf.get("amount") or 0)
+    op = (pf.get("operator") or "$lte").strip()
+    if op in {"$gte", "$gt"}:
+        meets = amount >= target if op == "$gte" else amount > target
+        if meets:
+            return (0, amount - target)
+        return (1, target - amount)
+    # $lte / $lt / default
+    meets = amount <= target if op != "$lt" else amount < target
+    if meets:
+        return (0, target - amount)
+    return (1, amount - target)
+
+
 def rank_products_by_color_match(
     products: list[dict],
     *,
@@ -241,6 +292,8 @@ def rank_products_by_color_match(
     color_search_tier: str | None,
     size_terms: set[str] | None = None,
     size_relaxed: bool = False,
+    price_filter: dict | None = None,
+    original_price_filter: dict | None = None,
 ) -> list[tuple[dict, dict]]:
     """Return products sorted nearest color match first (stable for ties)."""
     if not products:
@@ -251,7 +304,20 @@ def rank_products_by_color_match(
         or match_terms
         or exact_color_terms
     )
+    has_price = bool(original_price_filter or price_filter)
+
     if not has_color_signal:
+        if has_price:
+            scored = []
+            for p in products:
+                key = price_proximity_sort_key(
+                    p, price_filter, original_price_filter=original_price_filter
+                )
+                scored.append(
+                    (p, {"sort_key": key, "rank_method": "price_proximity"})
+                )
+            scored.sort(key=lambda item: item[1]["sort_key"])
+            return scored
         return [
             (p, {"sort_key": (0, 0, 0, 0, 0, 0, 0), "rank_method": "catalog_order"})
             for p in products
@@ -268,9 +334,22 @@ def rank_products_by_color_match(
             size_relaxed=size_relaxed,
         )
         score["rank_method"] = "color_relevance"
+        if has_price:
+            score["price_key"] = price_proximity_sort_key(
+                product, price_filter, original_price_filter=original_price_filter
+            )
         scored.append((product, score))
 
-    scored.sort(key=lambda item: item[1]["sort_key"], reverse=True)
+    if has_price:
+        scored.sort(
+            key=lambda item: (
+                # color sort_key is higher-better; invert via negation of tuple ranks
+                tuple(-x for x in item[1]["sort_key"]),
+                item[1].get("price_key") or (0, 0),
+            )
+        )
+    else:
+        scored.sort(key=lambda item: item[1]["sort_key"], reverse=True)
     return scored
 
 
@@ -284,6 +363,8 @@ def select_top_products(
     size_terms: set[str] | None = None,
     size_relaxed: bool = False,
     limit: int = 3,
+    price_filter: dict | None = None,
+    original_price_filter: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Pick top N products by nearest color relevance instead of random sampling."""
     ranked = rank_products_by_color_match(
@@ -294,6 +375,8 @@ def select_top_products(
         color_search_tier=color_search_tier,
         size_terms=size_terms,
         size_relaxed=size_relaxed,
+        price_filter=price_filter,
+        original_price_filter=original_price_filter,
     )
     top = ranked[:limit]
     return [p for p, _ in top], [s for _, s in top]

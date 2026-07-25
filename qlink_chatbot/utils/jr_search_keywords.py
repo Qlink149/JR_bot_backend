@@ -347,6 +347,18 @@ def normalise_keyword(keyword: str) -> tuple[dict | None, str, set[str], dict[st
 
     attribute_filters["color_exact"] = exact_color_terms
 
+    # Hallway/entryway → also search Runner shape (Room field has no Hallway value).
+    hallway_rooms = {"hallway", "entryway", "corridor", "passage"}
+    rooms = attribute_filters.get("room") or set()
+    if rooms & hallway_rooms:
+        shapes = attribute_filters.setdefault("shape", set())
+        shape_l = {str(s).lower() for s in shapes}
+        if "runner" not in shape_l:
+            shapes.add("runner")
+        runner_token = SHAPE_ALIASES.get("runner", "Runner")
+        if not any(str(s).lower() == "runner" for s in clean_segments):
+            clean_segments.append(runner_token)
+
     return overall_price_filter, "&".join(clean_segments), color_check_terms, attribute_filters
 
 

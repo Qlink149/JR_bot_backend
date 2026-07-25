@@ -886,6 +886,18 @@ def build_search_payload_from_attrs(attrs: dict) -> dict[str, Any]:
     if weight:
         attribute_filters["weight_max"].add(float(weight))
 
+    # Hallway/entryway → Runner shape (catalog has no Hallway Room value).
+    hallway_rooms = {"hallway", "entryway", "corridor", "passage"}
+    rooms_l = {str(r).lower() for r in (attrs.get("rooms") or [])}
+    if rooms_l & hallway_rooms:
+        shapes = attribute_filters.setdefault("shape", set())
+        if "runner" not in {str(s).lower() for s in shapes}:
+            shapes.add("runner")
+        shapes_attr = list(attrs.get("shapes") or [])
+        if "runner" not in {str(s).lower() for s in shapes_attr}:
+            attrs = dict(attrs)
+            attrs["shapes"] = shapes_attr + ["runner"]
+
     attribute_filters["color_exact"] = exact_color_terms
     price_filter = _price_dict_to_mongo_filter(attrs.get("price"))
     clean_keyword = attributes_to_catalog_keyword(attrs)

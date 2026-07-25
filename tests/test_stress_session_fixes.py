@@ -89,3 +89,59 @@ def test_merge_only_round_keeps_prior_color():
 def test_extract_show_more_size():
     assert _extract_show_more_keyword("show more 5x8") == "5x8"
     assert _extract_show_more_keyword("show more") == ""
+
+
+def test_never_drop_catalog_tag_strategy():
+    from qlink_chatbot.utils.jr_search_strategies import build_search_strategies
+
+    ids = [
+        s.id
+        for s in build_search_strategies(
+            "new",
+            {"catalog_tag": {"new"}},
+            None,
+        )
+    ]
+    assert "exact" in ids
+    assert "drop_catalog_tag" not in ids
+
+
+def test_hallway_injects_runner_shape():
+    _pf, clean, _colors, attrs = normalise_keyword("runner rugs for hallway under USD 2000")
+    assert "hallway" in (attrs.get("room") or set())
+    assert "runner" in {str(s).lower() for s in (attrs.get("shape") or set())}
+    assert "runner" in clean.lower()
+
+
+def test_hallway_room_matches_runner_product():
+    from qlink_chatbot.utils.jr_search_mongo import product_matches_room
+
+    runner = {"Room": "", "Shape": "Runner", "SizeInFT": "2'6x8", "MultiFilter": ""}
+    living = {"Room": "Living Room", "Shape": "Rectangle", "SizeInFT": "8x10"}
+    assert product_matches_room(runner, "hallway")
+    assert product_matches_room(living, "living room")
+    assert not product_matches_room(living, "hallway")
+
+
+def test_gte_price_proximity_prefers_above_floor():
+    from qlink_chatbot.utils.jr_search_recommendation import select_top_products
+
+    products = [
+        {"SKU": "LOW", "USD_MRP": "16302"},
+        {"SKU": "HIGH", "USD_MRP": "50085"},
+        {"SKU": "MID", "USD_MRP": "17856"},
+    ]
+    original = {"currency": "USD", "amount": 20000, "operator": "$gte"}
+    widened = {"currency": "USD", "amount": 16000, "operator": "$gte"}
+    top, _ = select_top_products(
+        products,
+        match_terms=set(),
+        exact_color_terms=set(),
+        breakdown_by_sku={},
+        color_search_tier=None,
+        limit=3,
+        price_filter=widened,
+        original_price_filter=original,
+    )
+    assert top[0]["SKU"] == "HIGH"
+    assert {p["SKU"] for p in top[:1]} == {"HIGH"}
