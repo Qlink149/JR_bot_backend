@@ -34,133 +34,23 @@ from qlink_chatbot.utils.jr_search_recommendation import (
     build_product_recommendation_reason,
     select_top_products,
 )
+from qlink_chatbot.utils.jr_search_strategies import (
+    MONGO_SEGMENT_DROP_ORDER,
+    SEGMENT_TYPE_TO_FILTER_KEYS,
+    SIZE_RELAX_NOTE,
+    build_search_strategies,
+    copy_attribute_filters,
+    filters_without_keys,
+    prefer_drop_size_over_exact,
+)
 from qlink_chatbot.utils.logger_config import logger
 from qlink_chatbot.utils.search_session import SEARCH_PAGE_SIZE, SEARCH_POOL_SIZE
 
-
-def _copy_attribute_filters(attribute_filters: dict) -> dict:
-    out = {}
-    for key, values in (attribute_filters or {}).items():
-        out[key] = set(values) if isinstance(values, (set, list, tuple)) else values
-    return out
-
-
-def _strip_values_from_keyword(keyword: str, values) -> str:
-    drop = {str(v).strip().lower() for v in (values or []) if v}
-    if not drop:
-        return keyword or ""
-    kept = [
-        part.strip()
-        for part in (keyword or "").split("&")
-        if part.strip() and part.strip().lower() not in drop
-    ]
-    return "&".join(kept)
-
-
-def _strip_segment_types_from_keyword(keyword: str, segment_types: set[str]) -> str:
-    """Drop keyword &-segments whose classify_segment() is in segment_types."""
-    if not keyword or not segment_types:
-        return keyword or ""
-    kept = [
-        part.strip()
-        for part in keyword.split("&")
-        if part.strip() and classify_segment(part.strip()) not in segment_types
-    ]
-    return "&".join(kept)
-
-
-# Kisna-style: drop secondary facets before giving up on an empty Mongo $and.
-_MONGO_SEGMENT_DROP_ORDER: tuple[tuple[str, str], ...] = (
-    ("size", "No exact size match in catalog — showing other sizes."),
-    ("shape", "No rugs matched that shape with your other filters — showing other shapes."),
-    ("room", "Broadened search by dropping the room filter."),
-    ("pattern", "Broadened search by dropping the pattern filter."),
-    ("construction", "Broadened search by dropping the construction filter."),
-    ("material", "Broadened search by dropping the material filter."),
-    ("catalog_tag", "Broadened search by dropping the catalog-tag filter."),
-    ("weight", "Broadened search by dropping the weight filter."),
-    ("general", "Broadened search — showing closer catalog matches."),
-)
-
-_SEGMENT_TYPE_TO_FILTER_KEYS: dict[str, tuple[str, ...]] = {
-    "size": ("size", "size_cm", "size_category"),
-    "shape": ("shape",),
-    "room": ("room",),
-    "pattern": ("pattern",),
-    "construction": ("construction",),
-    "material": ("material",),
-    "catalog_tag": ("catalog_tag",),
-    "weight": ("weight_max",),
-}
-
-
-def _widen_price_filter(price_filter: dict | None, factor: float = 1.25) -> dict | None:
-    """Widen a budget band. Kisna drops price; we first widen, then drop.
-
-    Critical: for $gte / min floors, widening must LOWER the threshold
-    (amount / factor), not raise it.
-    """
-    if not price_filter:
-        return None
-    out = dict(price_filter)
-    op = (out.get("operator") or "").strip()
-    if "amount" in out and out["amount"] is not None:
-        amount = float(out["amount"])
-        if op == "$gte":
-            out["amount"] = int(amount / factor)
-        else:
-            # $lte / default — raise the ceiling
-            out["amount"] = int(amount * factor)
-    if "max_amount" in out and out["max_amount"] is not None:
-        out["max_amount"] = int(float(out["max_amount"]) * factor)
-    if "min_amount" in out and out["min_amount"] is not None:
-        out["min_amount"] = int(float(out["min_amount"]) / factor)
-    return out
-
-
-def _filters_without_keys(attribute_filters: dict, *keys: str) -> dict:
-    out = _copy_attribute_filters(attribute_filters)
-    for key in keys:
-        if key in out and isinstance(out[key], set):
-            out[key] = set()
-        elif key in out:
-            out[key] = None
-    return out
-
-
-# Progressive post-filter relax order (Kisna: drop one constraint at a time + honest note).
-_PROGRESSIVE_RELAX_STEPS: tuple[tuple[str, str], ...] = (
-    (
-        "size_category",
-        "No exact size-bucket match — showing other sizes that fit your other filters.",
-    ),
-    (
-        "shape",
-        "No rugs matched that shape with your other filters — showing other shapes.",
-    ),
-    ("room", "Broadened search by dropping the room filter."),
-    ("weight_max", "Broadened search by dropping the weight filter."),
-    ("catalog_tag", "Broadened search by dropping the catalog-tag filter."),
-    ("pattern", "Broadened search by dropping the pattern filter."),
-    ("construction", "Broadened search by dropping the construction filter."),
-    ("material", "Broadened search by dropping the material filter."),
-)
-
-
-def _apply_drop_to_keyword(keyword: str, drop_key: str, values) -> str:
-    """Strip keyword segments for a dropped attribute key."""
-    if drop_key == "weight_max":
-        return _strip_segment_types_from_keyword(keyword, {"weight"})
-    if drop_key == "catalog_tag":
-        kw = _strip_values_from_keyword(keyword, values)
-        return _strip_segment_types_from_keyword(kw, {"catalog_tag"})
-    if drop_key in {"size", "size_cm", "size_category"}:
-        kw = _strip_values_from_keyword(keyword, values)
-        return _strip_segment_types_from_keyword(kw, {"size"}) or kw
-    if drop_key in {"shape", "room", "pattern", "construction", "material"}:
-        kw = _strip_values_from_keyword(keyword, values)
-        return _strip_segment_types_from_keyword(kw, {drop_key}) or kw
-    return _strip_values_from_keyword(keyword, values)
+# Back-compat aliases for any external imports / tests.
+_copy_attribute_filters = copy_attribute_filters
+_filters_without_keys = filters_without_keys
+_MONGO_SEGMENT_DROP_ORDER = MONGO_SEGMENT_DROP_ORDER
+_SEGMENT_TYPE_TO_FILTER_KEYS = SEGMENT_TYPE_TO_FILTER_KEYS
 
 # Kept for dashboard_routes imports
 product_color_collection = db["product_color"]
@@ -317,30 +207,30 @@ async def jaipur_rugs_product_search(
         logger.info(f"[SEARCH] raw results from {search_source}: {len(raw_results)}")
 
         # Kisna-style: never give up on empty Mongo $and before dropping secondary segments.
-        effective_filters = _copy_attribute_filters(attribute_filters)
+        effective_filters = copy_attribute_filters(attribute_filters)
         effective_keyword = clean_keyword
         effective_price = price_filter
         fallback_note = ""
+        search_strategy = "exact"
         if not raw_results and clean_keyword and "&" in clean_keyword:
             working_segs = [s.strip() for s in clean_keyword.split("&") if s.strip()]
-            working_filters = _copy_attribute_filters(attribute_filters)
-            for drop_type, note in _MONGO_SEGMENT_DROP_ORDER:
+            working_filters = copy_attribute_filters(attribute_filters)
+            for drop_type, note in MONGO_SEGMENT_DROP_ORDER:
                 typed = [s for s in working_segs if classify_segment(s) == drop_type]
                 if not typed:
                     continue
-                # Never drop the last remaining color-bearing ask into empty keyword.
                 remaining = [s for s in working_segs if classify_segment(s) != drop_type]
                 if not remaining:
                     continue
                 working_segs = remaining
-                for filter_key in _SEGMENT_TYPE_TO_FILTER_KEYS.get(drop_type, ()):
-                    working_filters = _filters_without_keys(working_filters, filter_key)
+                for filter_key in SEGMENT_TYPE_TO_FILTER_KEYS.get(drop_type, ()):
+                    working_filters = filters_without_keys(working_filters, filter_key)
                 if drop_type == "size":
                     working_filters = filters_without_size(working_filters)
                 trial_kw = "&".join(working_segs)
                 logger.info(
-                    f"[SEARCH] empty Mongo $and — retry without segment_type={drop_type} "
-                    f"keyword={trial_kw!r}"
+                    f"[SEARCH] strategy=mongo_drop_{drop_type} "
+                    f"empty Mongo $and — keyword={trial_kw!r}"
                 )
                 trial_raw, trial_pre = await asyncio.to_thread(
                     mongo_search_products,
@@ -354,9 +244,10 @@ async def jaipur_rugs_product_search(
                     effective_filters = working_filters
                     attribute_filters = working_filters
                     fallback_note = note
+                    search_strategy = f"mongo_drop_{drop_type}"
                     search_source = f"mongo-search-relax-{drop_type}"
                     logger.info(
-                        f"[SEARCH] recovered empty Mongo via drop={drop_type} "
+                        f"[SEARCH] strategy={search_strategy} recovered empty Mongo "
                         f"n={len(raw_results)}"
                     )
                     break
@@ -373,207 +264,154 @@ async def jaipur_rugs_product_search(
                 f"Construction={_p.get('Construction')!r} Pattern={_p.get('Pattern')!r}"
             )
 
-        unique_results, color_search_tier, pipeline_meta = await asyncio.to_thread(
-            apply_search_pipeline,
-            raw_results,
-            color_check_terms=color_check_terms,
-            attribute_filters=attribute_filters,
-            price_filter=price_filter,
-            exclude_skus=exclude_skus,
-            skip_color_post_filter=color_prefiltered,
+        # Single strategy loop (exact → drop_size → drop attrs → widen/drop price).
+        strategies = build_search_strategies(
+            clean_keyword, attribute_filters, price_filter
         )
-        size_relaxed = bool((pipeline_meta or {}).get("size_relaxed"))
-        if size_relaxed and not fallback_note:
-            fallback_note = (
-                "No exact size match — showing closest available sizes that fit "
-                "your other filters."
-            )
-            effective_filters = filters_without_size(effective_filters)
+        unique_results: list = []
+        color_search_tier: str | None = None
+        size_relaxed = False
+        exact_snapshot: dict | None = None
+        raw_by_keyword: dict[str, tuple[list, bool]] = {
+            clean_keyword: (raw_results, color_prefiltered),
+        }
 
-        # Prefer catalog-label color at nearby sizes over yarn-% matches at exact size.
-        size_requested = bool(
-            (attribute_filters.get("size") or set())
-            or (attribute_filters.get("size_cm") or set())
-            or (attribute_filters.get("size_category") or set())
-        )
-        weak_or_empty = (
-            not unique_results
-            or color_search_tier in {None, "breakdown_fallback"}
-        )
-        if size_requested and weak_or_empty and clean_keyword:
-            kw_no_size = strip_size_segments_from_keyword(clean_keyword)
-            has_size_bucket = bool(attribute_filters.get("size_category") or set())
-            # Size-category-only queries have no ft/cm segment to strip — still re-run
-            # without the size_category post-filter.
-            should_relax_size = (
-                (kw_no_size and kw_no_size != clean_keyword)
-                or (has_size_bucket and not unique_results)
-            )
-            if should_relax_size:
-                relax_keyword = (
-                    kw_no_size
-                    if (kw_no_size and kw_no_size != clean_keyword)
-                    else clean_keyword
-                )
-                logger.info(
-                    f"[SEARCH] re-query without size for catalog color "
-                    f"(was tier={color_search_tier!r}) keyword={relax_keyword!r}"
-                )
-                raw_relaxed, color_pre_relaxed = await asyncio.to_thread(
+        for strat in strategies:
+            strat_kw = (strat.keyword or clean_keyword or "").strip()
+            if strat_kw in raw_by_keyword:
+                strat_raw, strat_pre = raw_by_keyword[strat_kw]
+            else:
+                strat_raw, strat_pre = await asyncio.to_thread(
                     mongo_search_products,
-                    relax_keyword,
+                    strat_kw,
                 )
-                relaxed_filters = filters_without_size(attribute_filters)
-                relaxed_results, relaxed_tier, relaxed_meta = await asyncio.to_thread(
-                    apply_search_pipeline,
-                    raw_relaxed,
-                    color_check_terms=color_check_terms,
-                    attribute_filters=relaxed_filters,
-                    price_filter=price_filter,
-                    exclude_skus=exclude_skus,
-                    skip_color_post_filter=color_pre_relaxed,
-                )
-                prefer_relaxed = (
-                    relaxed_results
-                    and relaxed_tier in {
-                        "exact_catalog_color",
-                        "similar_catalog_color",
-                        "mixture_catalog_color",
-                    }
-                )
-                if prefer_relaxed or (not unique_results and relaxed_results):
-                    unique_results = relaxed_results
-                    color_search_tier = relaxed_tier
-                    size_relaxed = True
-                    effective_filters = relaxed_filters
-                    effective_keyword = relax_keyword
-                    if not fallback_note:
-                        fallback_note = (
-                            "No exact size match — showing closest available sizes "
-                            "that fit your other filters."
-                        )
+                raw_by_keyword[strat_kw] = (strat_raw, strat_pre)
+                if not strat_raw:
                     logger.info(
-                        f"[SEARCH] using size-relaxed catalog results "
-                        f"tier={color_search_tier!r} n={len(unique_results)}"
+                        f"[SEARCH] strategy={strat.id} mongo empty keyword={strat_kw!r}"
                     )
-
-        # Progressive filter relax (Kisna: drop one constraint + honest note).
-        if not unique_results:
-            working_filters = _copy_attribute_filters(attribute_filters)
-            working_keyword = clean_keyword
-            working_price = price_filter
-            for drop_key, note in _PROGRESSIVE_RELAX_STEPS:
-                values = working_filters.get(drop_key) or set()
-                if not values:
                     continue
-                working_filters = _filters_without_keys(working_filters, drop_key)
-                working_keyword = _apply_drop_to_keyword(
-                    working_keyword, drop_key, values
-                )
-                if working_keyword:
-                    raw_fb, color_pre_fb = await asyncio.to_thread(
-                        mongo_search_products,
-                        working_keyword,
-                    )
-                else:
-                    raw_fb = raw_results
-                    color_pre_fb = color_prefiltered
-                fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
-                    apply_search_pipeline,
-                    raw_fb,
-                    color_check_terms=color_check_terms,
-                    attribute_filters=working_filters,
-                    price_filter=working_price,
-                    exclude_skus=exclude_skus,
-                    skip_color_post_filter=color_pre_fb,
-                )
-                if fb_results:
+
+            fb_results, fb_tier, fb_meta = await asyncio.to_thread(
+                apply_search_pipeline,
+                strat_raw,
+                color_check_terms=color_check_terms,
+                attribute_filters=strat.filters,
+                price_filter=strat.price_filter,
+                exclude_skus=exclude_skus,
+                skip_color_post_filter=strat_pre,
+            )
+            pipeline_size_relaxed = bool((fb_meta or {}).get("size_relaxed"))
+
+            if strat.id == "exact":
+                exact_snapshot = {
+                    "results": fb_results,
+                    "tier": fb_tier,
+                    "meta": fb_meta,
+                    "filters": strat.filters,
+                    "keyword": strat_kw,
+                    "price": strat.price_filter,
+                    "note": strat.note,
+                    "size_relaxed": pipeline_size_relaxed or strat.size_relaxed,
+                }
+                # Strong exact wins immediately; weak/empty continues for drop_size prefer.
+                if fb_results and fb_tier not in {None, "breakdown_fallback"}:
                     unique_results = fb_results
                     color_search_tier = fb_tier
-                    fallback_note = note
-                    effective_filters = working_filters
-                    effective_keyword = working_keyword
-                    effective_price = working_price
-                    if drop_key == "size_category":
-                        size_relaxed = True
+                    effective_filters = strat.filters
+                    effective_keyword = strat_kw
+                    effective_price = strat.price_filter
+                    size_relaxed = pipeline_size_relaxed or strat.size_relaxed
+                    if not search_strategy.startswith("mongo_drop_"):
+                        search_strategy = "exact"
+                    if size_relaxed and not fallback_note:
+                        fallback_note = SIZE_RELAX_NOTE
                     logger.info(
-                        f"[SEARCH] progressive fallback dropped={drop_key} "
-                        f"n={len(unique_results)}"
+                        f"[SEARCH] strategy={search_strategy} n={len(unique_results)} "
+                        f"tier={fb_tier!r}"
                     )
                     break
-
-            if not unique_results and working_price:
-                widened = _widen_price_filter(working_price, 1.25)
-                if working_keyword:
-                    raw_fb, color_pre_fb = await asyncio.to_thread(
-                        mongo_search_products,
-                        working_keyword,
-                    )
-                else:
-                    raw_fb = raw_results
-                    color_pre_fb = color_prefiltered
-                fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
-                    apply_search_pipeline,
-                    raw_fb,
-                    color_check_terms=color_check_terms,
-                    attribute_filters=working_filters,
-                    price_filter=widened,
-                    exclude_skus=exclude_skus,
-                    skip_color_post_filter=color_pre_fb,
+                logger.info(
+                    f"[SEARCH] strategy=exact weak_or_empty "
+                    f"n={len(fb_results)} tier={fb_tier!r} — continue"
                 )
-                if fb_results:
+                continue
+
+            if strat.id == "drop_size" and exact_snapshot is not None:
+                if prefer_drop_size_over_exact(
+                    exact_results=exact_snapshot["results"],
+                    exact_tier=exact_snapshot["tier"],
+                    drop_size_results=fb_results,
+                    drop_size_tier=fb_tier,
+                ):
                     unique_results = fb_results
                     color_search_tier = fb_tier
-                    fallback_note = (
-                        "No exact budget match — showing a slightly wider price range."
-                    )
-                    effective_filters = working_filters
-                    effective_keyword = working_keyword
-                    effective_price = widened
+                    effective_filters = strat.filters
+                    effective_keyword = strat_kw
+                    effective_price = strat.price_filter
+                    size_relaxed = True
+                    fallback_note = strat.note or fallback_note
+                    search_strategy = "drop_size"
                     logger.info(
-                        f"[SEARCH] progressive fallback widened price n={len(unique_results)}"
+                        f"[SEARCH] strategy=drop_size n={len(unique_results)} "
+                        f"tier={fb_tier!r} (preferred over weak exact)"
                     )
+                    break
+                if exact_snapshot["results"]:
+                    # Exact had some results — keep them even if weak when drop_size worse
+                    unique_results = exact_snapshot["results"]
+                    color_search_tier = exact_snapshot["tier"]
+                    effective_filters = exact_snapshot["filters"]
+                    effective_keyword = exact_snapshot["keyword"]
+                    effective_price = exact_snapshot["price"]
+                    size_relaxed = exact_snapshot["size_relaxed"]
+                    if size_relaxed and not fallback_note:
+                        fallback_note = exact_snapshot["note"] or fallback_note
+                    if not search_strategy.startswith("mongo_drop_"):
+                        search_strategy = "exact"
+                    logger.info(
+                        f"[SEARCH] strategy=exact n={len(unique_results)} "
+                        f"(kept after drop_size miss)"
+                    )
+                    break
+                # both empty — continue
+                continue
 
-            # Kisna last resort: drop price entirely while keeping remaining filters.
-            if not unique_results and working_price:
-                if working_keyword:
-                    raw_fb, color_pre_fb = await asyncio.to_thread(
-                        mongo_search_products,
-                        working_keyword,
-                    )
-                else:
-                    raw_fb = raw_results
-                    color_pre_fb = color_prefiltered
-                fb_results, fb_tier, _fb_meta = await asyncio.to_thread(
-                    apply_search_pipeline,
-                    raw_fb,
-                    color_check_terms=color_check_terms,
-                    attribute_filters=working_filters,
-                    price_filter=None,
-                    exclude_skus=exclude_skus,
-                    skip_color_post_filter=color_pre_fb,
+            if fb_results:
+                unique_results = fb_results
+                color_search_tier = fb_tier
+                effective_filters = strat.filters
+                effective_keyword = strat_kw
+                effective_price = strat.price_filter
+                size_relaxed = pipeline_size_relaxed or strat.size_relaxed
+                fallback_note = strat.note or fallback_note
+                search_strategy = strat.id
+                logger.info(
+                    f"[SEARCH] strategy={search_strategy} n={len(unique_results)} "
+                    f"tier={fb_tier!r}"
                 )
-                if fb_results:
-                    unique_results = fb_results
-                    color_search_tier = fb_tier
-                    fallback_note = (
-                        "No rugs in that exact price range — showing closest matches "
-                        "with your other filters."
-                    )
-                    effective_filters = working_filters
-                    effective_keyword = working_keyword
-                    effective_price = None
-                    logger.info(
-                        f"[SEARCH] progressive fallback dropped price n={len(unique_results)}"
-                    )
+                break
+
+        # If we only captured a weak exact and never broke, use exact snapshot.
+        if not unique_results and exact_snapshot and exact_snapshot["results"]:
+            unique_results = exact_snapshot["results"]
+            color_search_tier = exact_snapshot["tier"]
+            effective_filters = exact_snapshot["filters"]
+            effective_keyword = exact_snapshot["keyword"]
+            effective_price = exact_snapshot["price"]
+            size_relaxed = exact_snapshot["size_relaxed"]
+            if not search_strategy.startswith("mongo_drop_"):
+                search_strategy = "exact"
+            if size_relaxed and not fallback_note:
+                fallback_note = exact_snapshot["note"] or fallback_note
 
         if not unique_results:
-            logger.warning("[SEARCH] 0 products after filters")
+            logger.warning("[SEARCH] 0 products after strategy loop")
             return {"error": "No products found."}
 
         if color_search_tier:
             logger.info(
-                f"[SEARCH] color match tier: {color_search_tier}"
+                f"[SEARCH] strategy={search_strategy} color_tier={color_search_tier}"
                 + (" size_relaxed=true" if size_relaxed else "")
             )
 
@@ -657,6 +495,8 @@ async def jaipur_rugs_product_search(
 
             if fallback_note:
                 reason = {**reason, "fallback_note": fallback_note}
+            if search_strategy:
+                reason = {**reason, "search_strategy": search_strategy}
             formatted.append({
                 "url": f"https://www.jaipurrugs.com/in/rugs/{p.get('ProductURL')}?barcode={barcode}",
                 "price": {"currency": currency, "amount": price_amount},
@@ -666,6 +506,7 @@ async def jaipur_rugs_product_search(
                 "color_search_tier": color_search_tier,
                 "size_relaxed": size_relaxed,
                 "fallback_note": fallback_note,
+                "search_strategy": search_strategy,
                 "name": (p.get("Name") or p.get("Collection") or "").strip(),
                 "SKU": sku,
                 "collection": p.get("Collection", ""),

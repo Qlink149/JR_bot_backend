@@ -247,11 +247,20 @@ async def run_bot_search(
                 "color_family": p.get("color_family"),
                 "size_relaxed": p.get("size_relaxed"),
                 "fallback_note": p.get("fallback_note"),
+                "search_strategy": p.get("search_strategy"),
             }
             for p in (page if isinstance(page, list) else [])[:5]
         ],
         "fallback_note": next(
             (p.get("fallback_note") for p in (page if isinstance(page, list) else []) if p.get("fallback_note")),
+            "",
+        ),
+        "strategy": next(
+            (
+                p.get("search_strategy")
+                for p in (page if isinstance(page, list) else [])
+                if p.get("search_strategy")
+            ),
             "",
         ),
     }
@@ -324,6 +333,7 @@ def verdict_for_expect(search: dict, expect_sku: str) -> str:
             f"family={summary.get('ColorFamily')!r} usd={summary.get('USD_MRP')}"
         )
     note = search.get("fallback_note") or ""
+    strategy = search.get("strategy") or ""
     return (
         f"VERDICT: LOGIC - SKU {sku} is IN Mongo (instock={summary.get('inStock_flag')}, "
         f"shape={summary.get('Shape')}, size={summary.get('SizeInFT')}, "
@@ -331,7 +341,7 @@ def verdict_for_expect(search: dict, expect_sku: str) -> str:
         f"USD={summary.get('USD_MRP')}, red_token={summary.get('has_red_token')}) "
         f"but bot did not return it. "
         f"clean_keyword={search.get('clean_keyword')!r} price={search.get('price_filter')} "
-        f"fallback_note={note!r}. "
+        f"strategy={strategy!r} fallback_note={note!r}. "
         "Typical cause: strict color AND (family red not counted) or size/shape hard filter."
     )
 
@@ -415,12 +425,16 @@ async def async_main(args: argparse.Namespace) -> int:
                 "pipeline_strict_count",
                 "pipeline_tier",
                 "pipeline_meta",
+                "strategy",
                 "fallback_note",
                 "bot_pool_count",
                 "bot_top",
                 "pipeline_top",
             )
         })
+        strategy = search.get("strategy") or ""
+        if strategy:
+            print(f"\n[SEARCH] strategy={strategy}")
         if args.expect_sku:
             print("\n" + verdict_for_expect(search, args.expect_sku))
         elif isinstance(search.get("bot_page"), dict) and search["bot_page"].get("error"):
@@ -428,12 +442,15 @@ async def async_main(args: argparse.Namespace) -> int:
         elif search.get("fallback_note"):
             print(
                 "\nVERDICT: LOGIC_RELAXED - bot returned products only after dropping filters. "
-                f"Note: {search['fallback_note']!r}. "
+                f"strategy={strategy!r} Note: {search['fallback_note']!r}. "
                 "If the website shows a round/red hit in-band, check --find that product "
                 "(API gap vs ColorFamily strictness)."
             )
         else:
-            print("\nVERDICT: OK_OR_CHECK - bot returned a page; spot-check SKUs vs website.")
+            print(
+                "\nVERDICT: OK_OR_CHECK - bot returned a page; spot-check SKUs vs website. "
+                f"strategy={strategy!r}."
+            )
 
     print(
         "\nClient one-liner tips:\n"

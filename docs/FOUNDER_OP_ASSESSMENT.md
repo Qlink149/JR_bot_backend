@@ -116,7 +116,7 @@ Website filters are **chips**. Bot historically used **invented buckets**.
 |---------|---------|-----------|-----|
 | Medium | SizeGroup chips ~5×8, 6×9, 8×10 (+ dia rounds in marketing) | sqft 48–120 (5×8 = **small**) | Map medium → SizeGroup set + matching dia rounds |
 | Red | Color chip includes family / coral / rose often | Strict GrColor / tokens; ColorFamily often excluded | Include ColorFamily / DisplayFilter for recall when shape+price tight |
-| Price | INR buckets on `/in`, USD on `/us` | User-stated currency (good) but demos mix INR PLP vs USD chat | Detect locale; document demo currency |
+| Price | INR buckets on `/in`, USD on `/us` | User-stated currency MRP field (not FX) | **Demo contract:** website `/in` INR chips ≠ chat query with USD amounts — bot uses the stated currency’s MRP field (`USD_MRP` / `INR_MRP`), not a conversion of the other locale’s PLP |
 | In stock | Ready to ship chip | `LiveStatus && Published` | Align QuickShip if API exposes it |
 
 ### 3.4 Target search behavior (“perfect”)
@@ -164,8 +164,8 @@ For every shop-by query:
    - Strengthens bleed protection beyond hygiene.
 
 7. **Currency / locale contract**  
-   - Web: respect stated currency; default from country.  
-   - Document: “Demo on `/in` with INR filters ≠ USD chat query.”
+   - Web: prefer stated currency in the query over country default; fall back to country/IP.  
+   - **Demo contract:** Demo on website `/in` INR chips ≠ chat query with USD amounts. Bot uses stated-currency MRP fields (`USD_MRP` vs `INR_MRP`) — not FX conversion between locales.
 
 #### Phase C — Catalog truth (P0 ongoing, parallel)
 

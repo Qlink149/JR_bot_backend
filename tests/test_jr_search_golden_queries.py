@@ -24,9 +24,11 @@ from qlink_chatbot.utils.jr_search_keywords import normalise_keyword
 from qlink_chatbot.utils.jr_search_llm_extract import (
     _sanitize_attrs_to_current_message,
     _should_ignore_previous_search,
+    apply_llm_evidence_gate,
     build_search_payload_from_attrs,
     validate_extracted_attributes,
 )
+from qlink_chatbot.utils.jr_search_strategies import build_search_strategies
 from qlink_chatbot.utils.jr_search_mongo import apply_search_pipeline
 from qlink_chatbot.utils.jr_search_recommendation import select_top_products
 from qlink_chatbot.utils.jr_search_sizes import product_matches_size_category
@@ -380,6 +382,7 @@ def test_golden_honesty_single_note_on_shape_drop():
     products = [{
         "name": "Crimson Rect",
         "size_relaxed": True,
+        "search_strategy": "drop_shape",
         "fallback_note": (
             "No rugs matched that shape with your other filters — showing other shapes."
         ),
@@ -395,6 +398,66 @@ def test_golden_honesty_single_note_on_shape_drop():
     msg = format_product_search_message(products)
     assert "showing other shapes" in msg.lower()
     assert msg.lower().count("no rugs matched that shape") == 1
+    assert products[0]["search_strategy"] == "drop_shape"
+
+
+def test_golden_overconstrained_strategy_drop_shape():
+    """Fixture: red+round+silk over-constrained → drop_shape strategy + note kind."""
+    filters = {
+        "color_exact": {"red"},
+        "shape": {"round"},
+        "material": {"silk"},
+        "size_category": {"medium"},
+    }
+    strats = build_search_strategies(
+        "red&round&silk&medium",
+        filters,
+        {"operator": "$lte", "amount": 20000, "currency": "USD"},
+    )
+    ids = [s.id for s in strats]
+    assert ids[0] == "exact"
+    assert "drop_size" in ids
+    assert "drop_shape" in ids
+    drop_shape = next(s for s in strats if s.id == "drop_shape")
+    assert "showing other shapes" in drop_shape.note.lower()
+    # Simulated win: attach strategy fields the API would set on products.
+    products = [{
+        "name": "Red Rect",
+        "search_strategy": "drop_shape",
+        "fallback_note": drop_shape.note,
+        "size_relaxed": False,
+        "display_price": "USD 18,000",
+        "url": "https://www.jaipurrugs.com/in/rugs/x",
+        "image": "https://example.com/x.jpg",
+        "size": "8x10",
+        "material": "Wool",
+    }]
+    assert products_honesty_note(products) == drop_shape.note
+    assert "showing other shapes" in build_search_intro(products=products).lower()
+
+
+def test_golden_evidence_gate_strips_aurelia_keeps_hinglish():
+    soft = apply_llm_evidence_gate(
+        "is there any new arrival",
+        {
+            "colors": ["red"],
+            "shapes": ["round"],
+            "collection": "Aurelia",
+            "catalog_tags": ["new"],
+        },
+    )
+    assert soft.get("colors") == []
+    assert soft.get("shapes") == []
+    assert soft.get("collection") in (None, "")
+    assert soft.get("catalog_tags") == ["new"]
+
+    hinglish = apply_llm_evidence_gate(
+        "laal gol dari",
+        {"colors": ["red"], "shapes": ["round"], "collection": "Aurelia"},
+    )
+    assert "red" in hinglish.get("colors") or []
+    assert "round" in hinglish.get("shapes") or []
+    assert hinglish.get("collection") in (None, "")
 
 
 # ---------------------------------------------------------------------------

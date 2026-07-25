@@ -792,6 +792,24 @@ def _debug_search_params(keyword: str, llm_extraction: dict | None = None) -> di
     return serialise_for_json(params)
 
 
+def _winning_search_strategy(products) -> str:
+    if not isinstance(products, list):
+        return ""
+    return next(
+        (str(p.get("search_strategy") or "") for p in products if p.get("search_strategy")),
+        "",
+    )
+
+
+def _winning_fallback_note(products) -> str:
+    if not isinstance(products, list):
+        return ""
+    return next(
+        (str(p.get("fallback_note") or "") for p in products if p.get("fallback_note")),
+        "",
+    )
+
+
 def _product_search_tool_debug(
     *,
     keyword: str,
@@ -803,6 +821,8 @@ def _product_search_tool_debug(
 ) -> dict:
     llm_extraction = llm_extract_debug[0] if llm_extract_debug else None
     product_count = len(products) if isinstance(products, list) else 0
+    strategy = _winning_search_strategy(products)
+    fallback_note = _winning_fallback_note(products)
     debug = {
         "tool": "jaipur_rugs_product_search",
         "keyword": keyword_sent_to_api,
@@ -810,6 +830,8 @@ def _product_search_tool_debug(
         "keyword_sent_to_api": keyword_sent_to_api,
         "currency": currency or "",
         "products_found": product_count,
+        "strategy": strategy,
+        "fallback_note": fallback_note,
         "products": _debug_product_rows(products),
         "search_params": _debug_search_params(keyword, llm_extraction),
     }
@@ -1328,16 +1350,16 @@ async def chat_agent(
                     else:
                         clear_search_buffer(session_id, collection_name=collection_name)
                     size_relaxed = any(p.get("size_relaxed") for p in product_list)
+                    win_strategy = _winning_search_strategy(product_list)
+                    win_note = _winning_fallback_note(product_list)
                     log_search_turn(
                         session_id=session_id,
                         search_keyword=memory_keyword or keyword,
                         ignore_previous=ignore_previous,
                         mongo_keyword=keyword_sent_to_api,
                         size_relaxed=size_relaxed,
-                        fallback_note=next(
-                            (p.get("fallback_note") or "" for p in product_list if p.get("fallback_note")),
-                            "",
-                        ),
+                        fallback_note=win_note,
+                        strategy=win_strategy,
                         products_found=product_count,
                     )
                     if debug_collector is not None:
@@ -1352,6 +1374,8 @@ async def chat_agent(
                                     "keyword_raw_from_model": model_keyword,
                                     "ignored_previous_search": ignore_previous,
                                     "size_relaxed": size_relaxed,
+                                    "strategy": win_strategy,
+                                    "fallback_note": win_note,
                                     "pool_size": len(pool or product_list),
                                 },
                             )
@@ -1497,12 +1521,16 @@ async def chat_agent(
                 )
             else:
                 clear_search_buffer(session_id, collection_name=collection_name)
+            win_strategy = _winning_search_strategy(product_list)
+            win_note = _winning_fallback_note(product_list)
             log_search_turn(
                 session_id=session_id,
                 search_keyword=memory_keyword or keyword,
                 ignore_previous=ignore_previous,
                 mongo_keyword=keyword_sent_to_api,
                 size_relaxed=any(p.get("size_relaxed") for p in product_list),
+                fallback_note=win_note,
+                strategy=win_strategy,
                 products_found=len(product_list),
                 extra={"forced": True},
             )
@@ -1514,7 +1542,11 @@ async def chat_agent(
                         currency=detected_currency,
                         products=product_list,
                         llm_extract_debug=llm_extract_debug,
-                        extra={"forced": True},
+                        extra={
+                            "forced": True,
+                            "strategy": win_strategy,
+                            "fallback_note": win_note,
+                        },
                     )
                 )
             return format_product_search_message(

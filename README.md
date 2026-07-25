@@ -75,6 +75,10 @@ python scripts/diagnose_catalog.py --query "show me red rugs above 15000 usd and
 python scripts/diagnose_catalog.py --query "red round above 15000 usd" --expect-sku PAE-5080-0001
 ```
 
+`--query` prints the winning `strategy=` (exact / drop_size / drop_shape / …) plus any honesty `fallback_note`.
+
+**Currency demo contract:** browsing the website PLP on `/in` with INR chips is not the same as a chat query that states USD amounts. The bot filters and displays the stated currency’s Product Master MRP field (`USD_MRP` / `INR_MRP`) — it does not FX-convert INR PLP prices into USD.
+
 Verdicts:
 
 | Tag | Meaning | What to tell the client |

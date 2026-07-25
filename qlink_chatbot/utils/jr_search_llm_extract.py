@@ -390,6 +390,56 @@ def _catalog_tag_evidenced_in_text(tag: str, text: str) -> bool:
     return False
 
 
+def apply_llm_evidence_gate(user_message: str, attrs: dict | None) -> dict:
+    """Keep only attrs evidenced in the current user message (named evidence gate).
+
+    Wraps color / shape / size / material / construction / pattern / room /
+    catalog-tag / collection rules. Soft asks (e.g. new arrival) drop bled
+    aurelia/red; Hinglish `laal`/`gol` still keep red/round via aliases.
+    """
+    current = (user_message or "").strip()
+    out = dict(attrs or {})
+    out["colors"] = [
+        c for c in (out.get("colors") or []) if _color_evidenced_in_text(c, current)
+    ]
+    out["shapes"] = [
+        s for s in (out.get("shapes") or []) if _shape_evidenced_in_text(s, current)
+    ]
+    out["sizes_ft"] = [
+        s for s in (out.get("sizes_ft") or []) if _token_evidenced_in_text(s, current)
+    ]
+    out["sizes_cm"] = [
+        s for s in (out.get("sizes_cm") or []) if _token_evidenced_in_text(s, current)
+    ]
+    out["size_categories"] = [
+        c for c in (out.get("size_categories") or []) if _token_evidenced_in_text(c, current)
+    ]
+    out["materials"] = [
+        m for m in (out.get("materials") or []) if _token_evidenced_in_text(m, current)
+    ]
+    out["constructions"] = [
+        c for c in (out.get("constructions") or []) if _token_evidenced_in_text(c, current)
+    ]
+    out["patterns"] = [
+        p for p in (out.get("patterns") or []) if _token_evidenced_in_text(p, current)
+    ]
+    out["rooms"] = [
+        r for r in (out.get("rooms") or []) if _token_evidenced_in_text(r, current)
+    ]
+    out["catalog_tags"] = [
+        t for t in (out.get("catalog_tags") or []) if _catalog_tag_evidenced_in_text(t, current)
+    ]
+    coll = (out.get("collection") or "").strip()
+    if coll and not _token_evidenced_in_text(coll, current):
+        out["collection"] = None
+    sku = (out.get("sku") or "").strip()
+    if sku and not _token_evidenced_in_text(sku, current):
+        out["sku"] = None
+    if out.get("multicolor") and not _token_evidenced_in_text("multicolor", current):
+        out["multicolor"] = False
+    return out
+
+
 def _sanitize_attrs_to_current_message(
     attrs: dict,
     *,
@@ -413,26 +463,7 @@ def _sanitize_attrs_to_current_message(
             user_message=current,
             user_message_only=True,
         )
-        # Strip bled attrs the LLM kept from prior context despite soft ask.
-        out["colors"] = [c for c in (out.get("colors") or []) if _color_evidenced_in_text(c, current)]
-        out["shapes"] = [s for s in (out.get("shapes") or []) if _shape_evidenced_in_text(s, current)]
-        out["sizes_ft"] = [s for s in (out.get("sizes_ft") or []) if _token_evidenced_in_text(s, current)]
-        out["sizes_cm"] = [s for s in (out.get("sizes_cm") or []) if _token_evidenced_in_text(s, current)]
-        out["size_categories"] = [
-            c for c in (out.get("size_categories") or []) if _token_evidenced_in_text(c, current)
-        ]
-        out["materials"] = [m for m in (out.get("materials") or []) if _token_evidenced_in_text(m, current)]
-        out["constructions"] = [
-            c for c in (out.get("constructions") or []) if _token_evidenced_in_text(c, current)
-        ]
-        out["patterns"] = [p for p in (out.get("patterns") or []) if _token_evidenced_in_text(p, current)]
-        out["rooms"] = [r for r in (out.get("rooms") or []) if _token_evidenced_in_text(r, current)]
-        out["catalog_tags"] = [
-            t for t in (out.get("catalog_tags") or []) if _catalog_tag_evidenced_in_text(t, current)
-        ]
-        coll = (out.get("collection") or "").strip()
-        if coll and not _token_evidenced_in_text(coll, current):
-            out["collection"] = None
+        out = apply_llm_evidence_gate(current, out)
         if notes:
             logger.info(f"[LLM-EXTRACT] trust_llm fresh-search merge: {notes}")
         return out
@@ -462,46 +493,45 @@ def _sanitize_attrs_to_current_message(
         user_message=current,
         user_message_only=True,
     )
-    # Merge LLM attrs only when evidenced in the current user message.
-    for tag in attrs.get("catalog_tags") or []:
-        if tag not in clean["catalog_tags"] and _catalog_tag_evidenced_in_text(tag, current):
+    # Merge LLM attrs only when evidenced, then run the shared gate once.
+    gated = apply_llm_evidence_gate(current, attrs)
+    for tag in gated.get("catalog_tags") or []:
+        if tag not in clean["catalog_tags"]:
             clean["catalog_tags"].append(tag)
-    coll = (attrs.get("collection") or "").strip()
-    if coll and not clean.get("collection") and _token_evidenced_in_text(coll, current):
+    coll = (gated.get("collection") or "").strip()
+    if coll and not clean.get("collection"):
         clean["collection"] = coll
-    for color in attrs.get("colors") or []:
-        if color not in clean["colors"] and _color_evidenced_in_text(color, current):
+    for color in gated.get("colors") or []:
+        if color not in clean["colors"]:
             clean["colors"].append(color)
-    for shape in attrs.get("shapes") or []:
-        if shape not in clean["shapes"] and _shape_evidenced_in_text(shape, current):
+    for shape in gated.get("shapes") or []:
+        if shape not in clean["shapes"]:
             clean["shapes"].append(shape)
-    for room in attrs.get("rooms") or []:
-        if room not in clean["rooms"] and _token_evidenced_in_text(room, current):
+    for room in gated.get("rooms") or []:
+        if room not in clean["rooms"]:
             clean["rooms"].append(room)
-    for size in attrs.get("sizes_ft") or []:
-        if size not in clean["sizes_ft"] and _token_evidenced_in_text(size, current):
+    for size in gated.get("sizes_ft") or []:
+        if size not in clean["sizes_ft"]:
             clean["sizes_ft"].append(size)
-    for size in attrs.get("sizes_cm") or []:
-        if size not in clean["sizes_cm"] and _token_evidenced_in_text(size, current):
+    for size in gated.get("sizes_cm") or []:
+        if size not in clean["sizes_cm"]:
             clean["sizes_cm"].append(size)
-    for cat in attrs.get("size_categories") or []:
-        if cat not in clean["size_categories"] and _token_evidenced_in_text(cat, current):
+    for cat in gated.get("size_categories") or []:
+        if cat not in clean["size_categories"]:
             clean["size_categories"].append(cat)
-    for material in attrs.get("materials") or []:
-        if material not in clean["materials"] and _token_evidenced_in_text(material, current):
+    for material in gated.get("materials") or []:
+        if material not in clean["materials"]:
             clean["materials"].append(material)
-    for construction in attrs.get("constructions") or []:
-        if construction not in clean["constructions"] and _token_evidenced_in_text(
-            construction, current
-        ):
+    for construction in gated.get("constructions") or []:
+        if construction not in clean["constructions"]:
             clean["constructions"].append(construction)
-    for pattern in attrs.get("patterns") or []:
-        if pattern not in clean["patterns"] and _token_evidenced_in_text(pattern, current):
+    for pattern in gated.get("patterns") or []:
+        if pattern not in clean["patterns"]:
             clean["patterns"].append(pattern)
-    sku = (attrs.get("sku") or "").strip()
-    if sku and not clean.get("sku") and _token_evidenced_in_text(sku, current):
+    sku = (gated.get("sku") or "").strip()
+    if sku and not clean.get("sku"):
         clean["sku"] = sku
-    if attrs.get("multicolor") and _token_evidenced_in_text("multicolor", current):
+    if gated.get("multicolor"):
         clean["multicolor"] = True
     if attrs.get("weight_max_kg") and not clean.get("weight_max_kg"):
         # Weight usually comes from regex backfill; keep LLM only if "kg" mentioned.

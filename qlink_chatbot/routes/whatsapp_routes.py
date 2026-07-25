@@ -497,13 +497,22 @@ async def _process_message(request_data: dict) -> None:
         dispatch_errors = dispatch_whatsapp_responses(
             phone_number=phone_number, bot_responses=responses
         )
+        wa_products = latest_products if latest_products else []
         log_search_turn(
             session_id=session_id,
             channel="whatsapp",
-            products_found=len(latest_products) if new_products_found else 0,
+            products_found=len(wa_products) if new_products_found else 0,
             wa_cards_sent=sum(1 for r in responses if r.get("type") == "interactive_cta"),
             dispatch_errors=dispatch_errors if isinstance(dispatch_errors, int) else 0,
-            size_relaxed=products_have_size_relaxed(latest_products) if latest_products else False,
+            size_relaxed=products_have_size_relaxed(wa_products) if wa_products else False,
+            fallback_note=next(
+                (p.get("fallback_note") or "" for p in wa_products if p.get("fallback_note")),
+                "",
+            ),
+            strategy=next(
+                (p.get("search_strategy") or "" for p in wa_products if p.get("search_strategy")),
+                "",
+            ),
         )
 
     except Exception as e:
