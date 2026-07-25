@@ -339,6 +339,35 @@ def test_golden_hindi_laal_maps_to_red():
     assert attrs2["colors"] == ["red"]
 
 
+def test_golden_hinglish_hara_gol_maps_green_round():
+    _pf, clean, colors, filters = normalise_keyword("hara gol dari")
+    assert "green" in (filters.get("color_exact") or set()) or "green" in clean
+    assert "round" in (filters.get("shape") or set()) or "round" in clean
+
+
+def test_golden_hinglish_peela_under_budget_keeps_yellow():
+    from qlink_chatbot.utils.jr_search_aliases import canonical_color_key
+
+    user = "peela rugs under 50000 inr"
+    assert canonical_color_key("peela") == "yellow"
+    attrs, _dropped = validate_extracted_attributes(
+        _v2_raw(colors=["yellow"], refinement="new"),
+        source_text=user,
+    )
+    payload = build_search_payload_from_attrs(attrs)
+    assert "yellow" in (payload["attribute_filters"].get("color_exact") or set())
+
+
+def test_golden_soft_new_arrival_still_english_clean_after_hinglish_prior():
+    clean = apply_llm_evidence_gate(
+        "is there any new arrival",
+        {"colors": ["green"], "shapes": ["round"], "catalog_tags": ["new"]},
+    )
+    assert clean.get("colors") == []
+    assert clean.get("shapes") == []
+    assert clean.get("catalog_tags") == ["new"]
+
+
 # ---------------------------------------------------------------------------
 # 7) Bleed: soft ask after aurelia must not keep collection/color
 # ---------------------------------------------------------------------------

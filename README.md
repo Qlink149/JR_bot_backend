@@ -96,6 +96,28 @@ python -m pytest tests/test_jr_search_golden_queries.py -q
 
 Covers soft new arrival, aurelia+red, red+round+USD (PAE-5080-class ColorFamily), medium/5×8, show-more, Hindi color, bleed, and single honesty note.
 
+### Knowledge base (policy FAQ)
+
+Bundled pages live in `data/policy_kb_pages.json`. If Pinecone answers are empty/stale on Vultr, re-ingest:
+
+```bash
+python scripts/fast_ingest_policy_kb.py
+```
+
+Requires `PINECONE_API` (or `PINECONE_API_KEY`), `PINECONE_NAMESPACE` (default `jaipurrugs_kb`), `PINECONE_INDEX`, and `OPENAI_API_KEY`. Smoke fixture content without Pinecone:
+
+```bash
+python -m pytest tests/test_kb_smoke.py -q
+```
+
+### Web chat debug drawer
+
+Open the user chat with `?debug=1` (persists in `localStorage`). Last-turn drawer shows `strategy=`, `search_verdict`, honesty note, SKUs, and a copyable diagnose bundle. Backend already emits these on the WS `debug` event.
+
+### WhatsApp images (Cloudinary)
+
+Product card images are rewritten via Cloudinary Fetch → JPEG when `CLOUDINARY_CLOUD_NAME` is set on Vultr. Without it, Gupshup often fails on JR CDN URLs and cards look broken — set the env var and restart the container.
+
 ## Local Development
 
 ```bash

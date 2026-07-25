@@ -111,7 +111,11 @@ tools = [
     {
         "type": "function",
         "name": "search_kb",
-        "description": "Perform a semantic search in the knowledge base to find related past summaries or insights from previous conversations or agent learnings.",
+        "description": (
+            "Search the knowledge base for Jaipur Rugs policy/FAQ content from jaipurrugs.com "
+            "(returns, shipping, payments, gifting, rug care) plus agent learnings. "
+            "Use for policy questions — not for product catalog search."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -810,6 +814,25 @@ def _winning_fallback_note(products) -> str:
     )
 
 
+def _search_verdict(
+    *,
+    strategy: str,
+    product_count: int,
+    fallback_note: str = "",
+) -> str:
+    """exact | relaxed | empty — lightweight diagnose language for web debug."""
+    if product_count <= 0:
+        return "empty"
+    s = (strategy or "").strip()
+    if s.startswith("drop_") or s in {"widen_price", "drop_price"}:
+        return "relaxed"
+    if s.startswith("mongo_drop_"):
+        return "relaxed" if (fallback_note or "").strip() else "exact"
+    if (fallback_note or "").strip():
+        return "relaxed"
+    return "exact"
+
+
 def _product_search_tool_debug(
     *,
     keyword: str,
@@ -823,6 +846,16 @@ def _product_search_tool_debug(
     product_count = len(products) if isinstance(products, list) else 0
     strategy = _winning_search_strategy(products)
     fallback_note = _winning_fallback_note(products)
+    size_relaxed = False
+    if isinstance(products, list):
+        size_relaxed = any(
+            bool(p.get("size_relaxed")) for p in products if isinstance(p, dict)
+        )
+    verdict = _search_verdict(
+        strategy=strategy,
+        product_count=product_count,
+        fallback_note=fallback_note,
+    )
     debug = {
         "tool": "jaipur_rugs_product_search",
         "keyword": keyword_sent_to_api,
@@ -832,6 +865,8 @@ def _product_search_tool_debug(
         "products_found": product_count,
         "strategy": strategy,
         "fallback_note": fallback_note,
+        "search_verdict": verdict,
+        "size_relaxed": size_relaxed,
         "products": _debug_product_rows(products),
         "search_params": _debug_search_params(keyword, llm_extraction),
     }
@@ -1405,7 +1440,12 @@ async def chat_agent(
                 elif item.name == "search_kb":
                     query = args.get("query")
                     logger.info(f"[AGENT-TOOL] search_kb query={query!r}")
-                    kb_search_response = await fetch_similar_sessions(query=query, top_k=5)
+                    kb_hit_previews: list = []
+                    kb_search_response = await fetch_similar_sessions(
+                        query=query,
+                        top_k=5,
+                        debug_hits_out=kb_hit_previews if debug_collector is not None else None,
+                    )
                     if debug_collector is not None:
                         kb_hits = 0
                         if isinstance(kb_search_response, list):
@@ -1416,6 +1456,7 @@ async def chat_agent(
                             "tool": "search_kb",
                             "query": query,
                             "results_found": kb_hits,
+                            "hits": kb_hit_previews,
                         })
                     output = json.dumps(kb_search_response)
 

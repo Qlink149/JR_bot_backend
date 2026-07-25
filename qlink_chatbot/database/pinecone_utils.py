@@ -118,7 +118,26 @@ def upsert_kb(
         raise e
     
 
-async def fetch_similar_sessions(query: str, top_k: int = 3):
+def kb_hits_preview_from_matches(matches: list, *, max_chars: int = 120) -> list[dict]:
+    """Compact hit list for web debug (label + short text preview)."""
+    hits: list[dict] = []
+    for r in matches or []:
+        meta = r.get("metadata") if isinstance(r, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        text = str(meta.get("text") or "").strip().replace("\n", " ")
+        label = str(meta.get("lable") or meta.get("label") or "kb").strip()
+        preview = text[:max_chars] + ("…" if len(text) > max_chars else "")
+        hits.append({"label": label, "preview": preview})
+    return hits
+
+
+async def fetch_similar_sessions(
+    query: str,
+    top_k: int = 3,
+    *,
+    debug_hits_out: list | None = None,
+):
     try:
         vector = get_embedding(query)
         results = fetch_kb(vector, top_k)
@@ -126,6 +145,9 @@ async def fetch_similar_sessions(query: str, top_k: int = 3):
         for r in results:
             if "metadata" in r:
                 kb.append(f"Source: {r['metadata']['lable']}, Knowledge: [ {r['metadata']['text']} ]")
+
+        if debug_hits_out is not None:
+            debug_hits_out.extend(kb_hits_preview_from_matches(results))
 
         logger.info(f"[Pinecone] fetched KB for {query} is {"\n".join(kb)}.")
         return "\n".join(kb)

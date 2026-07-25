@@ -119,10 +119,24 @@ def _whatsapp_text_after_product_cards(ai_text: str) -> str:
     return "Here are some rugs I found for you:"
 
 
+def _wa_display_price_for_caption(price_str: str, currency: str, sym: str) -> str:
+    """INR cards use ₹; keep English product names elsewhere."""
+    text = (price_str or "").strip()
+    if not text:
+        return text
+    if (currency or "").upper() == "INR":
+        stripped = re.sub(r"^INR\s*", "", text, flags=re.IGNORECASE).strip()
+        if stripped.startswith("₹"):
+            return stripped
+        return f"₹{stripped}"
+    return text
+
+
 def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
     """Convert product dicts to WhatsApp interactive_cta message dicts."""
     messages: list[dict] = []
-    sym = _CURRENCY_SYMBOLS.get(currency, currency + " ")
+    cur = (currency or "").strip().upper() or "INR"
+    sym = _CURRENCY_SYMBOLS.get(cur, cur + " ")
     ordinal = 0
 
     for product in products:
@@ -142,14 +156,19 @@ def _format_products_for_whatsapp(products: list, currency: str) -> list[dict]:
         price_str = (product.get("display_price") or "").strip()
         if not price_str:
             mrp = product.get("mrp", {}) or {}
-            price_val = mrp.get(currency)
+            price_val = mrp.get(cur) or mrp.get(currency)
             if price_val:
                 try:
-                    price_str = f"{sym}{float(price_val):,.0f} {currency}"
+                    if cur == "INR":
+                        price_str = f"₹{float(price_val):,.0f}"
+                    else:
+                        price_str = f"{sym}{float(price_val):,.0f} {cur}"
                 except (TypeError, ValueError):
-                    price_str = f"{sym}{price_val} {currency}"
+                    price_str = f"{sym}{price_val} {cur}"
             else:
                 price_str = "Price on request"
+        else:
+            price_str = _wa_display_price_for_caption(price_str, cur, sym)
 
         lines = [f"*{ordinal}. {name}*"]
         if size:
@@ -357,7 +376,10 @@ async def _process_message(request_data: dict) -> None:
                 phone_number=phone_number,
                 bot_responses=[{
                     "type": "text",
-                    "text": "Still working on your previous message — one moment please.",
+                    "text": (
+                        "Still working on your previous message — one moment please. "
+                        "I'll reply as soon as that finishes."
+                    ),
                 }],
             )
             return

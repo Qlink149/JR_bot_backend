@@ -140,6 +140,20 @@ HINGLISH_COLOR_ALIASES: dict[str, str] = {
     "सफेद": "white",
     "kala": "black",
     "काला": "black",
+    "hara": "green",
+    "हरा": "green",
+    "peela": "yellow",
+    "peelaa": "yellow",
+    "पीला": "yellow",
+    "bhura": "brown",
+    "bhoora": "brown",
+    "भूरा": "brown",
+    "grey": "gray",
+    "gray": "gray",
+    "slaty": "gray",
+    "slati": "gray",
+    "स्लेटी": "gray",
+    "sleti": "gray",
 }
 
 

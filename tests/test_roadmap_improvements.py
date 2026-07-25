@@ -109,7 +109,9 @@ def test_wa_cards_use_display_price_and_ordinals(monkeypatch):
     }]
     msgs = _format_products_for_whatsapp(products, "INR")
     assert msgs[0]["caption"].startswith("*1. Abrash*")
-    assert "INR 14,700" in msgs[0]["caption"]
+    assert "₹14,700" in msgs[0]["caption"]
+    assert "INR 14,700" not in msgs[0]["caption"]
+    assert "• Size: 5x8" in msgs[0]["caption"]
     assert "Closest available size" in msgs[0]["caption"]
 
 
