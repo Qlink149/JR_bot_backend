@@ -81,6 +81,13 @@ def test_empty_latest_search_blocks_followup_context():
 def test_ordinal_resolution_and_product_lookup():
     assert _resolve_product_ordinal("tell me about the 2nd one") == 2
     assert _resolve_product_ordinal("first rug please") == 1
+    assert _resolve_product_ordinal("show me #2") == 2
+    assert _resolve_product_ordinal("option 3") == 3
+    # Budget "3 lakhs" must NEVER be product #3.
+    assert _resolve_product_ordinal(
+        "Show me a grey rug, oval shape above 3 lakhs."
+    ) is None
+    assert _resolve_product_ordinal("above 3 lakh INR white round") is None
     searches = [{
         "keyword": "blue",
         "results": [

@@ -223,12 +223,6 @@ def format_recent_products_for_ai(previous_searches, max_products: int = 3) -> s
     return json.dumps(compact_products)
 
 
-_PRODUCT_ORDINAL_RE = re.compile(
-    r"\b(?:the\s+)?(?P<label>1st|2nd|3rd|first|second|third|one|#?(?P<num>[1-3]))\b"
-    r"(?:\s+(?:one|rug|product|option))?",
-    re.IGNORECASE,
-)
-
 _ORDINAL_MAP = {
     "1": 1, "1st": 1, "first": 1, "one": 1, "#1": 1,
     "2": 2, "2nd": 2, "second": 2, "#2": 2,
@@ -237,14 +231,18 @@ _ORDINAL_MAP = {
 
 
 def _resolve_product_ordinal(user_message: str) -> int | None:
+    """Parse 1st/2nd/3rd / #2 / 'option 3' — never bare digits in budgets ('3 lakhs')."""
     msg = (user_message or "").strip().lower()
     if not msg:
         return None
-    # Prefer explicit ordinal phrases over bare "one".
     for pattern in (
-        r"\b(?:the\s+)?(1st|first|#?1)\b",
-        r"\b(?:the\s+)?(2nd|second|#?2)\b",
-        r"\b(?:the\s+)?(3rd|third|#?3)\b",
+        # Explicit ordinal words / suffixes only — NOT bare 1/2/3.
+        r"\b(?:the\s+)?(1st|first)\b",
+        r"\b(?:the\s+)?(2nd|second)\b",
+        r"\b(?:the\s+)?(3rd|third)\b",
+        r"#\s*(1|2|3)\b",
+        r"\b(?:option|product|number|no\.?)\s*#?\s*(1|2|3)\b",
+        r"\b(1|2|3)\s*(?:st|nd|rd)\s+(?:one|rug|product|option)\b",
     ):
         m = re.search(pattern, msg, re.IGNORECASE)
         if m:
@@ -1195,10 +1193,22 @@ async def chat_agent(
             return show_more_reply
 
         # Deterministic "1st / 2nd / 3rd one" — do not invent which rug.
+        # Skip when this is a fresh catalog ask ("grey rug … above 3 lakhs").
         ordinal = _resolve_product_ordinal(user_message)
-        if ordinal and (
-            _is_product_detail_followup(user_message, chat_history)
-            or re.search(r"\b(one|rug|product|option|this|that)\b", user_message or "", re.I)
+        if (
+            ordinal
+            and not _is_new_product_search_request(
+                user_message, chat_history, previous_searches
+            )
+            and (
+                _is_product_detail_followup(user_message, chat_history)
+                or re.search(
+                    r"\b(1st|2nd|3rd|first|second|third|#\s*[1-3]|"
+                    r"(?:option|product|number)\s*#?\s*[1-3])\b",
+                    user_message or "",
+                    re.I,
+                )
+            )
         ):
             if previous_searches and not latest_search_has_results(previous_searches):
                 return (
