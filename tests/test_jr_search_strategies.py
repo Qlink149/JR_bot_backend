@@ -30,11 +30,29 @@ def test_strategy_order_exact_then_drops_then_price():
     ids = [s.id for s in build_search_strategies("red&round&medium&living", filters, price)]
     assert ids[0] == "exact"
     assert "drop_size" in ids
-    assert ids.index("drop_size") < ids.index("drop_shape")
-    assert ids.index("drop_shape") < ids.index("drop_room")
-    assert ids.index("drop_room") < ids.index("widen_price")
+    # Price escape comes BEFORE dropping shape (keep round when only budget is impossible).
+    assert ids.index("drop_size") < ids.index("widen_price")
     assert ids.index("widen_price") < ids.index("drop_price")
-    assert ids[-1] == "drop_price"
+    first_drop_price = ids.index("drop_price")
+    assert ids.index("drop_shape") > first_drop_price
+    assert "drop_room" in ids
+
+
+def test_drop_price_keeps_shape_filter():
+    """Impossible budget must not silently drop round when honesty says drop_price only."""
+    filters = {
+        "color_exact": {"white"},
+        "shape": {"round"},
+        "size_category": {"medium"},
+    }
+    price = {"operator": "$gte", "amount": 1_000_000, "currency": "USD"}
+    strats = build_search_strategies("white&round", filters, price)
+    # First drop_price (before attr drops) must still require round + medium.
+    first_drop_price = next(s for s in strats if s.id == "drop_price")
+    assert first_drop_price.filters.get("shape") == {"round"}
+    assert first_drop_price.filters.get("size_category") == {"medium"}
+    assert first_drop_price.price_filter is None
+    assert "round" in (first_drop_price.keyword or "").lower()
 
 
 def test_exact_has_empty_note_and_full_filters():
@@ -83,11 +101,16 @@ def test_drop_shape_note_when_exact_would_be_empty():
 def test_widen_then_drop_price():
     price = {"operator": "$lte", "amount": 10000, "currency": "USD"}
     filters = {"shape": {"round"}}
-    strats = {s.id: s for s in build_search_strategies("round", filters, price)}
-    assert strats["widen_price"].note == WIDEN_PRICE_NOTE
-    assert strats["widen_price"].price_filter["amount"] == 12500
-    assert strats["drop_price"].note == DROP_PRICE_NOTE
-    assert strats["drop_price"].price_filter is None
+    strats = [s for s in build_search_strategies("round", filters, price)]
+    by_id = {}
+    for s in strats:
+        by_id.setdefault(s.id, s)  # first wins — price-keep-shape variants
+    assert by_id["widen_price"].note == WIDEN_PRICE_NOTE
+    assert by_id["widen_price"].price_filter["amount"] == 12500
+    assert by_id["widen_price"].filters.get("shape") == {"round"}
+    assert by_id["drop_price"].note == DROP_PRICE_NOTE
+    assert by_id["drop_price"].price_filter is None
+    assert by_id["drop_price"].filters.get("shape") == {"round"}
 
 
 def test_widen_gte_lowers_floor():

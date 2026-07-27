@@ -186,6 +186,7 @@ def build_search_strategies(
         )
     )
 
+    size_kw = base_keyword
     if _has_size_filters(base_filters):
         size_kw = strip_size_segments_from_keyword(base_keyword) or base_keyword
         size_values: set = set()
@@ -203,8 +204,57 @@ def build_search_strategies(
             )
         )
 
-    # Cumulative attr drops (same as prior progressive loop): each step drops one
-    # more facet from the previous working filters, starting from exact/base.
+    # Price widen/drop KEEP shape/color/size — only the budget changes.
+    # (Old code used cumulative attr-stripped filters, so drop_price silently
+    # lost "round" while the honesty note only mentioned price.)
+    if price_filter:
+        widened = widen_price_filter(price_filter, 1.25)
+        if widened and widened != price_filter:
+            add(
+                SearchStrategy(
+                    id="widen_price",
+                    keyword=base_keyword,
+                    filters=copy_attribute_filters(base_filters),
+                    price_filter=widened,
+                    note=WIDEN_PRICE_NOTE,
+                    size_relaxed=False,
+                )
+            )
+        add(
+            SearchStrategy(
+                id="drop_price",
+                keyword=base_keyword,
+                filters=copy_attribute_filters(base_filters),
+                price_filter=None,
+                note=DROP_PRICE_NOTE,
+                size_relaxed=False,
+            )
+        )
+        # Same price escape with size already relaxed (medium too tight + wild budget).
+        if _has_size_filters(base_filters):
+            if widened and widened != price_filter:
+                add(
+                    SearchStrategy(
+                        id="widen_price",
+                        keyword=size_kw,
+                        filters=filters_without_size(base_filters),
+                        price_filter=widened,
+                        note=WIDEN_PRICE_NOTE,
+                        size_relaxed=True,
+                    )
+                )
+            add(
+                SearchStrategy(
+                    id="drop_price",
+                    keyword=size_kw,
+                    filters=filters_without_size(base_filters),
+                    price_filter=None,
+                    note=DROP_PRICE_NOTE,
+                    size_relaxed=True,
+                )
+            )
+
+    # Cumulative attr drops still carry the original price (shape too rare at that budget).
     working_filters = copy_attribute_filters(base_filters)
     working_keyword = base_keyword
     for drop_key, strat_id, note in _DROP_ATTR_STEPS:
@@ -224,18 +274,17 @@ def build_search_strategies(
             )
         )
 
-    # Price widen/drop use the most-relaxed attr filters so far (matches old
-    # progressive: after attr steps fail, widen/drop against working filters).
-    price_filters = copy_attribute_filters(working_filters)
-    price_keyword = working_keyword or base_keyword
+    # Last resort: price escape after attrs were dropped (only if filters differ).
     if price_filter:
+        loose_filters = copy_attribute_filters(working_filters)
+        loose_keyword = working_keyword or base_keyword
         widened = widen_price_filter(price_filter, 1.25)
         if widened and widened != price_filter:
             add(
                 SearchStrategy(
                     id="widen_price",
-                    keyword=price_keyword,
-                    filters=price_filters,
+                    keyword=loose_keyword,
+                    filters=loose_filters,
                     price_filter=widened,
                     note=WIDEN_PRICE_NOTE,
                     size_relaxed=False,
@@ -244,8 +293,8 @@ def build_search_strategies(
         add(
             SearchStrategy(
                 id="drop_price",
-                keyword=price_keyword,
-                filters=price_filters,
+                keyword=loose_keyword,
+                filters=loose_filters,
                 price_filter=None,
                 note=DROP_PRICE_NOTE,
                 size_relaxed=False,
