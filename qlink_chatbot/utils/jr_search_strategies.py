@@ -301,4 +301,7 @@ def prefer_drop_size_over_exact(
         return True
     if exact_tier in {None, "breakdown_fallback"} and drop_size_tier in _CATALOG_COLOR_TIERS:
         return True
+    # Prefer true ground-color with nearby size over ColorFamily-only with exact size.
+    if exact_tier == "similar_catalog_color" and drop_size_tier == "exact_catalog_color":
+        return True
     return False

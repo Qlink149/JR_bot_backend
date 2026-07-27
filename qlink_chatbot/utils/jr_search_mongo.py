@@ -998,6 +998,68 @@ def apply_attribute_post_filters(
     return result
 
 
+COLOR_FAMILY_RELAX_NOTE = (
+    "No exact match on the rug's main/ground color — showing ColorFamily "
+    "(site color-chip) matches."
+)
+BREAKDOWN_COLOR_RELAX_NOTE = (
+    "No catalog color-label match — showing rugs with that color in the yarn mix."
+)
+
+
+def _apply_non_color_filters(
+    color_pool: list[dict],
+    attribute_filters: dict[str, set],
+    price_filter: dict | None,
+    exclude_skus: set | None,
+) -> tuple[list[dict], dict]:
+    """Size / shape / material / price / exclude after a color phase pool is chosen."""
+    meta: dict = {"size_relaxed": False}
+    if not color_pool:
+        return [], meta
+
+    unique_results = apply_attribute_post_filters(
+        color_pool,
+        attribute_filters,
+        apply_size=True,
+        hard_size=True,
+    )
+    size_terms = attribute_filters.get("size") or set()
+    size_cm_terms = attribute_filters.get("size_cm") or set()
+    size_category_terms = attribute_filters.get("size_category") or set()
+    if (
+        not unique_results
+        and color_pool
+        and (size_terms or size_cm_terms or size_category_terms)
+    ):
+        logger.info(
+            "[SEARCH] size hard-empty after color phase — relaxing size "
+            f"(size={sorted(size_terms)} size_cm={sorted(size_cm_terms)} "
+            f"size_category={sorted(size_category_terms)})"
+        )
+        unique_results = apply_attribute_post_filters(
+            color_pool,
+            filters_without_size(attribute_filters),
+            apply_size=True,
+            hard_size=True,
+        )
+        meta["size_relaxed"] = bool(unique_results)
+
+    if not unique_results:
+        return [], meta
+
+    if price_filter:
+        unique_results = apply_price_filter(unique_results, price_filter)
+
+    if exclude_skus:
+        upper_exclude = {s.upper() for s in exclude_skus if s}
+        unique_results = [
+            p for p in unique_results
+            if str(p.get("SKU", "")).upper() not in upper_exclude
+        ]
+    return unique_results, meta
+
+
 def apply_search_pipeline(
     raw_results: list[dict],
     *,
@@ -1009,12 +1071,18 @@ def apply_search_pipeline(
 ) -> tuple[list[dict], str | None, dict]:
     """Apply color then attribute filters.
 
-    Returns (products, color_search_tier, meta) where meta may include size_relaxed.
+    Single-color asks use **phased** color matching (client trust):
+      1. GrColor / DisplayFilter only → tier ``exact_catalog_color``
+      2. else ColorFamily site chips → ``similar_catalog_color`` + honesty note
+      3. else yarn breakdown → ``breakdown_fallback`` + honesty note
+
+    Returns (products, color_search_tier, meta) where meta may include
+    ``size_relaxed`` and ``color_relax_note``.
     """
     unique_results = dedupe_by_sku(raw_results)
     logger.info(f"[SEARCH] after dedup: {len(unique_results)} unique products")
     color_search_tier: str | None = None
-    meta: dict = {"size_relaxed": False}
+    meta: dict = {"size_relaxed": False, "color_relax_note": ""}
 
     multicolor_terms = attribute_filters.get("multicolor") or set()
     exact_color_terms = set(attribute_filters.get("color_exact") or set())
@@ -1037,12 +1105,30 @@ def apply_search_pipeline(
             color_search_tier = "multicolor"
         else:
             return [], None, meta
-    elif exact_color_terms or color_check_terms:
+        filtered, non_meta = _apply_non_color_filters(
+            unique_results, attribute_filters, price_filter, exclude_skus
+        )
+        meta.update(non_meta)
+        return filtered, color_search_tier if filtered else None, meta
+
+    if exact_color_terms or color_check_terms:
         if skip_color_post_filter:
-            # Legacy path when Mongo already prefiltered — still label as catalog.
-            color_search_tier = "exact_catalog_color"
-        elif mixture:
-            # Mixture: each exact color must appear via catalog/family or yarn %.
+            # Legacy Mongo prefilter path — still phase-classify survivors after attrs.
+            filtered, non_meta = _apply_non_color_filters(
+                unique_results, attribute_filters, price_filter, exclude_skus
+            )
+            meta.update(non_meta)
+            if not filtered:
+                return [], None, meta
+            if any(product_matches_catalog_color(p, match_terms) for p in filtered):
+                return filtered, "exact_catalog_color", meta
+            if any(product_matches_single_color_family(p, match_terms) for p in filtered):
+                meta["color_relax_note"] = COLOR_FAMILY_RELAX_NOTE
+                return filtered, "similar_catalog_color", meta
+            meta["color_relax_note"] = BREAKDOWN_COLOR_RELAX_NOTE
+            return filtered, "breakdown_fallback", meta
+
+        if mixture:
             skus = [
                 str(p.get("SKU") or p.get("BarCode") or "").strip()
                 for p in unique_results
@@ -1062,106 +1148,83 @@ def apply_search_pipeline(
                     f"[SEARCH] mixture color filter: {len(unique_results)} → "
                     f"{len(mixture_filtered)} (terms={sorted(required_colors)})"
                 )
-                unique_results = mixture_filtered
-                color_search_tier = "mixture_catalog_color"
-            else:
-                return [], None, meta
-        else:
-            # Single-color: union GrColor/DisplayFilter + ColorFamily (site chips).
-            # Nearest-first ranking keeps pure GrColor above soft family labels.
-            catalog_exact = [
-                p for p in unique_results
-                if product_matches_catalog_color(p, match_terms)
-            ]
-            family_filtered = [
-                p for p in unique_results
-                if product_matches_single_color_family(p, match_terms)
-            ]
-            if catalog_exact or family_filtered:
-                merged: dict[str, dict] = {}
-                for p in catalog_exact + family_filtered:
-                    key = str(p.get("SKU") or p.get("BarCode") or id(p))
-                    merged.setdefault(key, p)
-                unique_results = list(merged.values())
-                if catalog_exact:
-                    color_search_tier = "exact_catalog_color"
-                    logger.info(
-                        f"[SEARCH] catalog+family color filter: {len(merged)} "
-                        f"(grcolor/display={len(catalog_exact)} "
-                        f"family={len(family_filtered)} terms={sorted(match_terms)})"
-                    )
-                else:
-                    color_search_tier = "similar_catalog_color"
-                    logger.info(
-                        f"[SEARCH] similar catalog color (ColorFamily) filter: "
-                        f"{len(family_filtered)} (terms={sorted(match_terms)})"
-                    )
-            else:
-                skus = [
-                    str(p.get("SKU") or p.get("BarCode") or "").strip()
-                    for p in unique_results
-                ]
-                breakdown_by_sku = load_breakdowns_for_skus([s for s in skus if s])
-                breakdown_colors = user_terms_to_breakdown_colors(
-                    exact_color_terms or match_terms
+                filtered, non_meta = _apply_non_color_filters(
+                    mixture_filtered, attribute_filters, price_filter, exclude_skus
                 )
-                breakdown_filtered = [
-                    p for p in unique_results
-                    if breakdown_colors
-                    and product_matches_color_breakdown(
-                        p, breakdown_colors, breakdown_by_sku,
-                    )
-                ] if breakdown_colors else []
-                if breakdown_filtered:
-                    logger.info(
-                        f"[SEARCH] breakdown fallback filter: {len(unique_results)} → "
-                        f"{len(breakdown_filtered)} (colors={sorted(breakdown_colors)})"
-                    )
-                    unique_results = breakdown_filtered
-                    color_search_tier = "breakdown_fallback"
-                else:
-                    return [], None, meta
+                meta.update(non_meta)
+                return (
+                    filtered,
+                    "mixture_catalog_color" if filtered else None,
+                    meta,
+                )
+            return [], None, meta
 
-    # Non-size attrs first (hard size applied next with optional relax).
-    color_pool = unique_results
-    unique_results = apply_attribute_post_filters(
-        color_pool,
-        attribute_filters,
-        apply_size=True,
-        hard_size=True,
-    )
-    size_terms = attribute_filters.get("size") or set()
-    size_cm_terms = attribute_filters.get("size_cm") or set()
-    size_category_terms = attribute_filters.get("size_category") or set()
-    if (
-        not unique_results
-        and color_pool
-        and (size_terms or size_cm_terms or size_category_terms)
-    ):
-        # Soft-fallback: keep color quality, drop exact size / size-bucket requirement.
-        logger.info(
-            "[SEARCH] size hard-empty after color filter — relaxing size "
-            f"(size={sorted(size_terms)} size_cm={sorted(size_cm_terms)} "
-            f"size_category={sorted(size_category_terms)})"
+        # Phase 1 — ground / display color only (strongest, client-visible names).
+        phase1 = [
+            p for p in unique_results
+            if product_matches_catalog_color(p, match_terms)
+        ]
+        filtered, non_meta = _apply_non_color_filters(
+            phase1, attribute_filters, price_filter, exclude_skus
         )
-        unique_results = apply_attribute_post_filters(
-            color_pool,
-            filters_without_size(attribute_filters),
-            apply_size=True,
-            hard_size=True,
-        )
-        meta["size_relaxed"] = bool(unique_results)
+        if filtered:
+            meta.update(non_meta)
+            logger.info(
+                f"[SEARCH] color phase=grcolor/display n={len(filtered)} "
+                f"(phase1_pool={len(phase1)} terms={sorted(match_terms)})"
+            )
+            return filtered, "exact_catalog_color", meta
 
-    if not unique_results:
+        # Phase 2 — ColorFamily site chips (soft; honesty note required).
+        phase2 = [
+            p for p in unique_results
+            if product_matches_single_color_family(p, match_terms)
+        ]
+        filtered, non_meta = _apply_non_color_filters(
+            phase2, attribute_filters, price_filter, exclude_skus
+        )
+        if filtered:
+            meta.update(non_meta)
+            meta["color_relax_note"] = COLOR_FAMILY_RELAX_NOTE
+            logger.info(
+                f"[SEARCH] color phase=color_family n={len(filtered)} "
+                f"(phase2_pool={len(phase2)} terms={sorted(match_terms)}) "
+                f"note={COLOR_FAMILY_RELAX_NOTE!r}"
+            )
+            return filtered, "similar_catalog_color", meta
+
+        # Phase 3 — yarn breakdown last resort.
+        skus = [
+            str(p.get("SKU") or p.get("BarCode") or "").strip()
+            for p in unique_results
+        ]
+        breakdown_by_sku = load_breakdowns_for_skus([s for s in skus if s])
+        breakdown_colors = user_terms_to_breakdown_colors(
+            exact_color_terms or match_terms
+        )
+        phase3 = [
+            p for p in unique_results
+            if breakdown_colors
+            and product_matches_color_breakdown(
+                p, breakdown_colors, breakdown_by_sku,
+            )
+        ] if breakdown_colors else []
+        filtered, non_meta = _apply_non_color_filters(
+            phase3, attribute_filters, price_filter, exclude_skus
+        )
+        if filtered:
+            meta.update(non_meta)
+            meta["color_relax_note"] = BREAKDOWN_COLOR_RELAX_NOTE
+            logger.info(
+                f"[SEARCH] color phase=yarn_breakdown n={len(filtered)} "
+                f"(colors={sorted(breakdown_colors)})"
+            )
+            return filtered, "breakdown_fallback", meta
         return [], None, meta
 
-    if price_filter:
-        unique_results = apply_price_filter(unique_results, price_filter)
-
-    if exclude_skus:
-        upper_exclude = {s.upper() for s in exclude_skus if s}
-        unique_results = [
-            p for p in unique_results
-            if str(p.get("SKU", "")).upper() not in upper_exclude
-        ]
-    return unique_results, color_search_tier, meta
+    # No color intent — attribute / price only.
+    filtered, non_meta = _apply_non_color_filters(
+        unique_results, attribute_filters, price_filter, exclude_skus
+    )
+    meta.update(non_meta)
+    return filtered, None, meta

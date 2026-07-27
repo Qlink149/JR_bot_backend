@@ -114,7 +114,7 @@ def test_single_color_accepts_site_family_chips():
 
 
 def test_pipeline_prefers_catalog_over_pink_purple_family():
-    """GrColor purple stays in the pool; soft family may too — ranking demotes it."""
+    """Phase 1 GrColor purple wins alone — ColorFamily-only coral is not mixed in."""
     rose = _rug(
         SKU="ROSE-1",
         GrColor="Rose Smoke",
@@ -139,22 +139,38 @@ def test_pipeline_prefers_catalog_over_pink_purple_family():
         exclude_skus=None,
     )
     assert tier == "exact_catalog_color"
-    skus = {p["SKU"] for p in results}
-    assert "DARK-1" in skus
+    assert [p["SKU"] for p in results] == ["DARK-1"]
+    assert not (meta.get("color_relax_note") or "")
     assert meta.get("size_relaxed") is False
-    # Nearest-first: pure GrColor purple beats ColorFamily-only soft match.
-    selected, scores = select_top_products(
-        results,
-        match_terms=set(color_search_terms("purple")),
-        exact_color_terms={"purple"},
-        breakdown_by_sku={},
-        color_search_tier=tier,
-        limit=2,
+
+
+def test_pipeline_color_family_phase_when_no_grcolor():
+    """Phase 2: ColorFamily-only with honesty note when no ground-color hit."""
+    from qlink_chatbot.utils.jr_search_mongo import COLOR_FAMILY_RELAX_NOTE
+
+    rose = _rug(
+        SKU="ROSE-1",
+        GrColor="Coral Essence",
+        ColorFamily="Pink and Purple",
+        SizeInFT="6 round",
+        Shape="Round",
+        SizeGroupInFT="6 Dia Round",
+        USD_MRP=13731,
     )
-    assert selected[0]["SKU"] == "DARK-1"
-    assert scores[0]["catalog_score"] > (
-        scores[1]["catalog_score"] if len(scores) > 1 else 0
+    results, tier, meta = apply_search_pipeline(
+        [rose],
+        color_check_terms=set(color_search_terms("purple")),
+        attribute_filters={
+            "color_exact": {"purple"},
+            "shape": {"round"},
+            "size_category": {"medium"},
+        },
+        price_filter={"currency": "USD", "amount": 10000, "operator": "$gte"},
+        exclude_skus=None,
     )
+    assert tier == "similar_catalog_color"
+    assert [p["SKU"] for p in results] == ["ROSE-1"]
+    assert meta.get("color_relax_note") == COLOR_FAMILY_RELAX_NOTE
 
 
 def test_pipeline_mixture_allows_pink_and_purple_family():
@@ -314,10 +330,9 @@ def test_border_only_demoted_vs_ground_color():
 
 
 def test_red_family_soft_coral_recalled_and_ranked_below_grcolor_red():
-    """PAE-5080-class: Soft Coral + ColorFamily 'Red and Orange' must pass red filter.
+    """PAE-5080-class: Soft Coral + ColorFamily only when no GrColor red survives filters."""
+    from qlink_chatbot.utils.jr_search_mongo import COLOR_FAMILY_RELAX_NOTE
 
-    Pure GrColor red still ranks first (nearest-first).
-    """
     soft_coral = _rug(
         SKU="PAE-5080-0001",
         GrColor="Soft Coral",
@@ -334,7 +349,7 @@ def test_red_family_soft_coral_recalled_and_ranked_below_grcolor_red():
         SizeInFT="8x10",
         SizeGroupInFT="8X10",
     )
-    results, tier, _meta = apply_search_pipeline(
+    results, tier, meta = apply_search_pipeline(
         [soft_coral, hard_red],
         color_check_terms=set(color_search_terms("red")),
         attribute_filters={
@@ -345,11 +360,12 @@ def test_red_family_soft_coral_recalled_and_ranked_below_grcolor_red():
         price_filter=None,
         exclude_skus=None,
     )
-    assert tier in {"exact_catalog_color", "similar_catalog_color"}
+    assert tier == "similar_catalog_color"
     assert [p["SKU"] for p in results] == ["PAE-5080-0001"]
+    assert meta.get("color_relax_note") == COLOR_FAMILY_RELAX_NOTE
 
-    # Without shape: both recalled; GrColor red ranks above ColorFamily soft coral.
-    both, tier_both, _ = apply_search_pipeline(
+    # Without shape: Phase 1 GrColor red wins alone (soft coral not mixed in).
+    both, tier_both, meta_both = apply_search_pipeline(
         [soft_coral, hard_red],
         color_check_terms=set(color_search_terms("red")),
         attribute_filters={
@@ -359,18 +375,9 @@ def test_red_family_soft_coral_recalled_and_ranked_below_grcolor_red():
         price_filter=None,
         exclude_skus=None,
     )
-    assert {p["SKU"] for p in both} == {"PAE-5080-0001", "RED-RECT-1"}
-    selected, scores = select_top_products(
-        both,
-        match_terms=set(color_search_terms("red")),
-        exact_color_terms={"red"},
-        breakdown_by_sku={},
-        color_search_tier=tier_both,
-        limit=2,
-    )
-    assert selected[0]["SKU"] == "RED-RECT-1"
-    assert scores[0]["catalog_score"] > scores[1]["catalog_score"]
-    assert scores[1]["colorfamily_hit"] is True
+    assert tier_both == "exact_catalog_color"
+    assert [p["SKU"] for p in both] == ["RED-RECT-1"]
+    assert not (meta_both.get("color_relax_note") or "")
 
 
 def test_build_search_tokens_indexes_colorfamily_constituents():

@@ -935,7 +935,7 @@ def _search_verdict(
     if product_count <= 0:
         return "empty"
     s = (strategy or "").strip()
-    if s.startswith("drop_") or s in {"widen_price", "drop_price"}:
+    if s.startswith("drop_") or s.startswith("relax_") or s in {"widen_price", "drop_price"}:
         return "relaxed"
     if s.startswith("mongo_drop_"):
         return "relaxed" if (fallback_note or "").strip() else "exact"

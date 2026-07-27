@@ -235,12 +235,19 @@ def test_golden_red_round_usd_band_keeps_shape_and_pae_class():
     assert "RED-RECT-1" not in skus
     assert "RED-ROUND-CHEAP" not in skus
     assert meta.get("size_relaxed") is False
-    assert tier in {"exact_catalog_color", "similar_catalog_color"}
+    assert tier == "similar_catalog_color"
+    assert "ColorFamily" in (meta.get("color_relax_note") or "")
 
-    # Without ColorFamily recall, this used to empty on shape and drop round.
-    # Honesty note must stay empty when exact shape+color+price hit.
-    products = [{**p, "fallback_note": "", "size_relaxed": False} for p in results]
-    assert products_honesty_note(products) == ""
+    # ColorFamily-only is honest-relaxed (not claimed as exact ground color).
+    products = [
+        {
+            **p,
+            "fallback_note": meta.get("color_relax_note") or "",
+            "size_relaxed": False,
+        }
+        for p in results
+    ]
+    assert "ColorFamily" in (products_honesty_note(products) or "")
 
 
 # ---------------------------------------------------------------------------

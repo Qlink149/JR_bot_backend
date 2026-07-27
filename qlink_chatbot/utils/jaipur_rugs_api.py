@@ -327,6 +327,42 @@ async def jaipur_rugs_product_search(
                 skip_color_post_filter=strat_pre,
             )
             pipeline_size_relaxed = bool((fb_meta or {}).get("size_relaxed"))
+            color_relax_note = str((fb_meta or {}).get("color_relax_note") or "").strip()
+
+            def _accept_win(
+                *,
+                results,
+                tier,
+                filters,
+                keyword,
+                price,
+                size_rel: bool,
+                strat_id: str,
+                strat_note: str = "",
+            ) -> None:
+                nonlocal unique_results, color_search_tier, effective_filters
+                nonlocal effective_keyword, effective_price, size_relaxed
+                nonlocal fallback_note, search_strategy
+                unique_results = results
+                color_search_tier = tier
+                effective_filters = filters
+                effective_keyword = keyword
+                effective_price = price
+                size_relaxed = size_rel
+                # Strategy honesty first; color-family honesty when no other note.
+                if strat_note:
+                    fallback_note = strat_note
+                elif size_rel and not fallback_note:
+                    fallback_note = SIZE_RELAX_NOTE
+                elif color_relax_note and not fallback_note:
+                    fallback_note = color_relax_note
+                if not search_strategy.startswith("mongo_drop_"):
+                    if strat_id == "exact" and tier == "similar_catalog_color":
+                        search_strategy = "relax_color_family"
+                    elif strat_id == "exact" and tier == "breakdown_fallback":
+                        search_strategy = "relax_color_yarn"
+                    else:
+                        search_strategy = strat_id
 
             if strat.id == "exact":
                 exact_snapshot = {
@@ -338,19 +374,19 @@ async def jaipur_rugs_product_search(
                     "price": strat.price_filter,
                     "note": strat.note,
                     "size_relaxed": pipeline_size_relaxed or strat.size_relaxed,
+                    "color_relax_note": color_relax_note,
                 }
-                # Strong exact wins immediately; weak/empty continues for drop_size prefer.
+                # Strong / family exact wins immediately; yarn-only continues for drop_size.
                 if fb_results and fb_tier not in {None, "breakdown_fallback"}:
-                    unique_results = fb_results
-                    color_search_tier = fb_tier
-                    effective_filters = strat.filters
-                    effective_keyword = strat_kw
-                    effective_price = strat.price_filter
-                    size_relaxed = pipeline_size_relaxed or strat.size_relaxed
-                    if not search_strategy.startswith("mongo_drop_"):
-                        search_strategy = "exact"
-                    if size_relaxed and not fallback_note:
-                        fallback_note = SIZE_RELAX_NOTE
+                    _accept_win(
+                        results=fb_results,
+                        tier=fb_tier,
+                        filters=strat.filters,
+                        keyword=strat_kw,
+                        price=strat.price_filter,
+                        size_rel=pipeline_size_relaxed or strat.size_relaxed,
+                        strat_id="exact",
+                    )
                     logger.info(
                         f"[SEARCH] strategy={search_strategy} n={len(unique_results)} "
                         f"tier={fb_tier!r}"
@@ -369,48 +405,55 @@ async def jaipur_rugs_product_search(
                     drop_size_results=fb_results,
                     drop_size_tier=fb_tier,
                 ):
-                    unique_results = fb_results
-                    color_search_tier = fb_tier
-                    effective_filters = strat.filters
-                    effective_keyword = strat_kw
-                    effective_price = strat.price_filter
-                    size_relaxed = True
-                    fallback_note = strat.note or fallback_note
-                    search_strategy = "drop_size"
+                    color_relax_note = str(
+                        (fb_meta or {}).get("color_relax_note") or ""
+                    ).strip()
+                    _accept_win(
+                        results=fb_results,
+                        tier=fb_tier,
+                        filters=strat.filters,
+                        keyword=strat_kw,
+                        price=strat.price_filter,
+                        size_rel=True,
+                        strat_id="drop_size",
+                        strat_note=strat.note or "",
+                    )
                     logger.info(
                         f"[SEARCH] strategy=drop_size n={len(unique_results)} "
                         f"tier={fb_tier!r} (preferred over weak exact)"
                     )
                     break
                 if exact_snapshot["results"]:
-                    # Exact had some results — keep them even if weak when drop_size worse
-                    unique_results = exact_snapshot["results"]
-                    color_search_tier = exact_snapshot["tier"]
-                    effective_filters = exact_snapshot["filters"]
-                    effective_keyword = exact_snapshot["keyword"]
-                    effective_price = exact_snapshot["price"]
-                    size_relaxed = exact_snapshot["size_relaxed"]
-                    if size_relaxed and not fallback_note:
-                        fallback_note = exact_snapshot["note"] or fallback_note
-                    if not search_strategy.startswith("mongo_drop_"):
-                        search_strategy = "exact"
+                    color_relax_note = str(
+                        exact_snapshot.get("color_relax_note") or ""
+                    ).strip()
+                    _accept_win(
+                        results=exact_snapshot["results"],
+                        tier=exact_snapshot["tier"],
+                        filters=exact_snapshot["filters"],
+                        keyword=exact_snapshot["keyword"],
+                        price=exact_snapshot["price"],
+                        size_rel=exact_snapshot["size_relaxed"],
+                        strat_id="exact",
+                    )
                     logger.info(
-                        f"[SEARCH] strategy=exact n={len(unique_results)} "
+                        f"[SEARCH] strategy={search_strategy} n={len(unique_results)} "
                         f"(kept after drop_size miss)"
                     )
                     break
-                # both empty — continue
                 continue
 
             if fb_results:
-                unique_results = fb_results
-                color_search_tier = fb_tier
-                effective_filters = strat.filters
-                effective_keyword = strat_kw
-                effective_price = strat.price_filter
-                size_relaxed = pipeline_size_relaxed or strat.size_relaxed
-                fallback_note = strat.note or fallback_note
-                search_strategy = strat.id
+                _accept_win(
+                    results=fb_results,
+                    tier=fb_tier,
+                    filters=strat.filters,
+                    keyword=strat_kw,
+                    price=strat.price_filter,
+                    size_rel=pipeline_size_relaxed or strat.size_relaxed,
+                    strat_id=strat.id,
+                    strat_note=strat.note or "",
+                )
                 logger.info(
                     f"[SEARCH] strategy={search_strategy} n={len(unique_results)} "
                     f"tier={fb_tier!r}"
@@ -419,17 +462,16 @@ async def jaipur_rugs_product_search(
 
         # If we only captured a weak exact and never broke, use exact snapshot.
         if not unique_results and exact_snapshot and exact_snapshot["results"]:
-            unique_results = exact_snapshot["results"]
-            color_search_tier = exact_snapshot["tier"]
-            effective_filters = exact_snapshot["filters"]
-            effective_keyword = exact_snapshot["keyword"]
-            effective_price = exact_snapshot["price"]
-            size_relaxed = exact_snapshot["size_relaxed"]
-            if not search_strategy.startswith("mongo_drop_"):
-                search_strategy = "exact"
-            if size_relaxed and not fallback_note:
-                fallback_note = exact_snapshot["note"] or fallback_note
-
+            color_relax_note = str(exact_snapshot.get("color_relax_note") or "").strip()
+            _accept_win(
+                results=exact_snapshot["results"],
+                tier=exact_snapshot["tier"],
+                filters=exact_snapshot["filters"],
+                keyword=exact_snapshot["keyword"],
+                price=exact_snapshot["price"],
+                size_rel=exact_snapshot["size_relaxed"],
+                strat_id="exact",
+            )
         if not unique_results:
             logger.warning("[SEARCH] 0 products after strategy loop")
             return {"error": "No products found."}
