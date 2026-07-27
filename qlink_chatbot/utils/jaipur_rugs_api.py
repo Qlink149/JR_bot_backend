@@ -248,6 +248,9 @@ async def jaipur_rugs_product_search(
                     effective_keyword = trial_kw
                     effective_filters = working_filters
                     attribute_filters = working_filters
+                    if drop_type == "color":
+                        # Don't re-apply sticky color_check_terms after honest color drop.
+                        color_check_terms = set()
                     fallback_note = note
                     search_strategy = f"mongo_drop_{drop_type}"
                     search_source = f"mongo-search-relax-{drop_type}"
@@ -317,10 +320,14 @@ async def jaipur_rugs_product_search(
                     )
                     continue
 
+            has_color_filt = bool(strat.filters.get("color") or set()) or bool(
+                strat.filters.get("color_exact") or set()
+            )
+            strat_color_terms = color_check_terms if has_color_filt else set()
             fb_results, fb_tier, fb_meta = await asyncio.to_thread(
                 apply_search_pipeline,
                 strat_raw,
-                color_check_terms=color_check_terms,
+                color_check_terms=strat_color_terms,
                 attribute_filters=strat.filters,
                 price_filter=strat.price_filter,
                 exclude_skus=exclude_skus,
@@ -350,8 +357,13 @@ async def jaipur_rugs_product_search(
                 effective_price = price
                 size_relaxed = size_rel
                 # Strategy honesty first; color-family honesty when no other note.
+                # Keep mongo_drop_* bootstrap note — later widen/drop_price must not
+                # overwrite "dropped color/shape" with a misleading budget note.
                 if strat_note:
-                    fallback_note = strat_note
+                    if not (
+                        search_strategy.startswith("mongo_drop_") and fallback_note
+                    ):
+                        fallback_note = strat_note
                 elif size_rel and not fallback_note:
                     fallback_note = SIZE_RELAX_NOTE
                 elif color_relax_note and not fallback_note:
@@ -377,7 +389,14 @@ async def jaipur_rugs_product_search(
                     "color_relax_note": color_relax_note,
                 }
                 # Strong / family exact wins immediately; yarn-only continues for drop_size.
-                if fb_results and fb_tier not in {None, "breakdown_fallback"}:
+                # After mongo_drop_color (or a non-color ask), tier=None is expected success.
+                has_color_ask = bool(strat_color_terms) or bool(
+                    strat.filters.get("color") or set()
+                ) or bool(strat.filters.get("color_exact") or set())
+                exact_ok = bool(fb_results) and (
+                    fb_tier not in {None, "breakdown_fallback"} or not has_color_ask
+                )
+                if exact_ok:
                     _accept_win(
                         results=fb_results,
                         tier=fb_tier,

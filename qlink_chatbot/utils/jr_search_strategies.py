@@ -27,6 +27,14 @@ class SearchStrategy:
 
 
 _DROP_ATTR_STEPS: tuple[tuple[str, str, str], ...] = (
+    # Color before shape: specialty shapes (oval/round/runner) are rarer and more
+    # intentional than catalog color labels. Prefer "ovals in other colors" over
+    # "grey rectangles" when grey+oval is empty in Product Master.
+    (
+        "color",
+        "drop_color",
+        "No rugs matched that color with your other filters — showing other colors.",
+    ),
     (
         "shape",
         "drop_shape",
@@ -104,6 +112,9 @@ def apply_drop_to_keyword(keyword: str, drop_key: str, values) -> str:
     if drop_key in {"size", "size_cm", "size_category"}:
         kw = strip_values_from_keyword(keyword, values)
         return strip_segment_types_from_keyword(kw, {"size"}) or kw
+    if drop_key in {"color", "color_exact"}:
+        # Drop all color segments (aliases expand beyond the raw values set).
+        return strip_segment_types_from_keyword(keyword, {"color"}) or keyword
     if drop_key in {"shape", "room", "pattern", "construction", "material"}:
         kw = strip_values_from_keyword(keyword, values)
         return strip_segment_types_from_keyword(kw, {drop_key}) or kw
@@ -258,10 +269,21 @@ def build_search_strategies(
     working_filters = copy_attribute_filters(base_filters)
     working_keyword = base_keyword
     for drop_key, strat_id, note in _DROP_ATTR_STEPS:
-        if not _has_filter_values(working_filters, drop_key):
-            continue
-        values = working_filters.get(drop_key) or set()
-        working_filters = filters_without_keys(working_filters, drop_key)
+        if drop_key == "color":
+            has_color = _has_filter_values(working_filters, "color") or _has_filter_values(
+                working_filters, "color_exact"
+            )
+            if not has_color:
+                continue
+            values = set(working_filters.get("color") or set()) | set(
+                working_filters.get("color_exact") or set()
+            )
+            working_filters = filters_without_keys(working_filters, "color", "color_exact")
+        else:
+            if not _has_filter_values(working_filters, drop_key):
+                continue
+            values = working_filters.get(drop_key) or set()
+            working_filters = filters_without_keys(working_filters, drop_key)
         working_keyword = apply_drop_to_keyword(working_keyword, drop_key, values)
         add(
             SearchStrategy(
@@ -306,10 +328,16 @@ def build_search_strategies(
 
 # Mongo empty-$and bootstrap (recall) — kept separate from post-filter strategies.
 # Drop room before shape so "runner&hallway" recovers runners (hallway is sparse).
+# Drop color before shape so "grey&Oval" recovers ovals when Product Master has no
+# grey-labeled oval SKUs (website Grey chip ≠ GrColor/ColorFamily).
 # Never drop catalog_tag here — empty tagged pool must stay empty, not random rugs.
 MONGO_SEGMENT_DROP_ORDER: tuple[tuple[str, str], ...] = (
     ("size", "No exact size match in catalog — showing other sizes."),
     ("room", "Broadened search by dropping the room filter."),
+    (
+        "color",
+        "No rugs matched that color with your other filters — showing other colors.",
+    ),
     ("shape", "No rugs matched that shape with your other filters — showing other shapes."),
     ("pattern", "Broadened search by dropping the pattern filter."),
     ("construction", "Broadened search by dropping the construction filter."),
@@ -322,6 +350,7 @@ SEGMENT_TYPE_TO_FILTER_KEYS: dict[str, tuple[str, ...]] = {
     "size": ("size", "size_cm", "size_category"),
     "shape": ("shape",),
     "room": ("room",),
+    "color": ("color", "color_exact"),
     "pattern": ("pattern",),
     "construction": ("construction",),
     "material": ("material",),

@@ -82,6 +82,34 @@ def test_drop_size_note_and_clears_size_filters():
     assert ds.filters.get("shape") == {"round"}
 
 
+def test_drop_color_before_drop_shape():
+    """Specialty shape beats sticky color when both can't be satisfied."""
+    filters = {
+        "color": {"gray", "charcoal"},
+        "color_exact": {"gray"},
+        "shape": {"oval"},
+    }
+    strats = build_search_strategies("gray&Oval", filters, None)
+    ids = [s.id for s in strats]
+    assert "drop_color" in ids
+    assert "drop_shape" in ids
+    assert ids.index("drop_color") < ids.index("drop_shape")
+    dc = next(s for s in strats if s.id == "drop_color")
+    assert dc.filters.get("shape") == {"oval"}
+    assert not (dc.filters.get("color") or set())
+    assert not (dc.filters.get("color_exact") or set())
+    assert "oval" in (dc.keyword or "").lower()
+    assert "gray" not in (dc.keyword or "").lower()
+    assert "showing other colors" in dc.note.lower()
+
+
+def test_mongo_segment_drop_order_color_before_shape():
+    from qlink_chatbot.utils.jr_search_strategies import MONGO_SEGMENT_DROP_ORDER
+
+    types = [t for t, _ in MONGO_SEGMENT_DROP_ORDER]
+    assert types.index("color") < types.index("shape")
+
+
 def test_drop_shape_note_when_exact_would_be_empty():
     """Over-constrained: shape drop is present with honesty note (golden case)."""
     filters = {
@@ -92,6 +120,9 @@ def test_drop_shape_note_when_exact_would_be_empty():
     strats = {s.id: s for s in build_search_strategies("red&round&silk", filters, None)}
     assert strats["drop_shape"].note.startswith("No rugs matched that shape")
     assert not (strats["drop_shape"].filters.get("shape") or set())
+    # Cumulative: drop_color clears color first; drop_shape then clears shape.
+    assert "drop_color" in strats
+    assert strats["drop_color"].filters.get("shape") == {"round"}
     # Cumulative: drop_material comes after drop_shape and keeps shape cleared.
     assert "drop_material" in strats
     assert not (strats["drop_material"].filters.get("shape") or set())
